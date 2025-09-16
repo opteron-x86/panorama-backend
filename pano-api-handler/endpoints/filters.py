@@ -113,7 +113,55 @@ def get_filter_options() -> Dict[str, Any]:
             except Exception as e:
                 logger.error(f"Error getting tactics: {e}")
                 filter_options['tactics'] = []
-            
+
+            # Attack platforms from MITRE techniques
+            try:
+                attack_platforms_result = session.execute(text("""
+                    SELECT DISTINCT unnest(platforms) as platform,
+                        COUNT(DISTINCT rm.rule_id) as rule_count
+                    FROM mitre_techniques mt
+                    LEFT JOIN rule_mitre_mappings rm ON mt.id = rm.technique_id
+                    WHERE mt.platforms IS NOT NULL
+                    GROUP BY platform
+                    ORDER BY platform
+                """))
+                
+                filter_options['platforms'] = [
+                    {
+                        'value': row.platform,
+                        'label': row.platform,
+                        'count': row.rule_count
+                    }
+                    for row in attack_platforms_result
+                ]
+            except Exception as e:
+                logger.error(f"Error getting attack platforms: {e}")
+                filter_options['platforms'] = []
+
+            # MITRE tactics with counts
+            try:
+                tactics = session.execute(text("""
+                    SELECT mt.tactic_id, mt.name,
+                        COUNT(DISTINCT rm.rule_id) as rule_count
+                    FROM mitre_tactics mt
+                    LEFT JOIN mitre_techniques tech ON tech.tactic_id = mt.id
+                    LEFT JOIN rule_mitre_mappings rm ON tech.id = rm.technique_id
+                    GROUP BY mt.tactic_id, mt.name, mt.id
+                    ORDER BY mt.id
+                """))
+                
+                filter_options['tactics'] = [
+                    {
+                        'value': tactic.tactic_id,
+                        'label': tactic.name,
+                        'count': tactic.rule_count
+                    }
+                    for tactic in tactics
+                ]
+            except Exception as e:
+                logger.error(f"Error getting tactics: {e}")
+                filter_options['tactics'] = []
+                
             # Rule platforms from metadata - using raw SQL for JSONB array
             try:
                 platforms_result = session.execute(text("""

@@ -7,7 +7,7 @@ from typing import Dict, Any
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-from sqlalchemy import func, and_, or_, desc, extract, case
+from sqlalchemy import func, and_, or_, desc, extract, case, text, distinct
 
 from panorama_datamodel import db_session
 from panorama_datamodel.models import (
@@ -106,115 +106,150 @@ def handle_get_stats(params: Dict[str, Any]) -> Dict[str, Any]:
         return create_error_response(500, "Failed to generate statistics")
 
 
+
 def get_dashboard_data(params: Dict[str, Any]) -> Dict[str, Any]:
-    """Get comprehensive dashboard statistics"""
+    """
+    Single endpoint for dashboard metrics
+    """
     try:
         with db_session() as session:
             # Base metrics
-            total_rules = session.query(func.count(DetectionRule.id)).scalar()
-            active_rules = session.query(func.count(DetectionRule.id)).filter(
-                DetectionRule.is_active == True
-            ).scalar()
+            base_metrics = session.query(
+                func.count(DetectionRule.id).label('total_rules'),
+                func.sum(case((DetectionRule.is_active == True, 1), else_=0)).label('active_rules'),
+                func.sum(case((DetectionRule.is_active == False, 1), else_=0)).label('inactive_rules')
+            ).one()
             
-            # Rules by severity
-            rules_by_severity = {}
-            for severity in ['critical', 'high', 'medium', 'low', 'info']:
-                count = session.query(func.count(DetectionRule.id)).filter(
-                    DetectionRule.severity == severity
-                ).scalar()
-                rules_by_severity[severity] = count
+            # Severity distribution
+            severity_stats = session.query(
+                DetectionRule.severity,
+                func.count(DetectionRule.id).label('count')
+            ).group_by(DetectionRule.severity).all()
             
-            # Rules by source
-            source_data = session.query(
+            by_severity = {s.severity: s.count for s in severity_stats if s.severity}
+            
+            # Platform distribution from JSONB
+            platform_query = text("""
+                SELECT 
+                    platform,
+                    COUNT(*) as count
+                FROM detection_rules,
+                     jsonb_array_elements_text(
+                         CASE 
+                             WHEN rule_metadata ? 'rule_platforms' 
+                             THEN rule_metadata->'rule_platforms'
+                             ELSE '[]'::jsonb
+                         END
+                     ) as platform
+                WHERE is_active = true
+                GROUP BY platform
+                ORDER BY count DESC
+            """)
+            
+            platform_results = session.execute(platform_query).fetchall()
+            by_platform = {row.platform: row.count for row in platform_results}
+            
+            # Source distribution
+            source_stats = session.query(
                 RuleSource.name,
                 func.count(DetectionRule.id).label('count')
-            ).join(DetectionRule).group_by(RuleSource.name).all()
+            ).join(
+                RuleSource, DetectionRule.source_id == RuleSource.id
+            ).group_by(RuleSource.name).all()
             
-            rules_by_source = {s.name: s.count for s in source_data}
+            by_source = {s.name: s.count for s in source_stats}
             
-            # Rules by type
-            type_data = session.query(
-                DetectionRule.rule_type,
-                func.count(DetectionRule.id).label('count')
+            # MITRE enrichment
+            mitre_enriched = session.query(
+                func.count(distinct(RuleMitreMapping.rule_id))
+            ).scalar() or 0
+            
+            # CVE enrichment
+            cve_enriched = session.query(
+                func.count(distinct(RuleCveMapping.rule_id))
+            ).scalar() or 0
+            
+            # Both enrichments
+            both_enriched = session.query(
+                func.count(distinct(RuleMitreMapping.rule_id))
             ).filter(
-                DetectionRule.rule_type != None
-            ).group_by(DetectionRule.rule_type).all()
-            
-            rules_by_type = {t.rule_type: t.count for t in type_data}
-            
-            # Enrichment statistics
-            with_mitre = session.query(func.count(DetectionRule.id)).filter(
-                func.jsonb_array_length(
-                    DetectionRule.rule_metadata['extracted_mitre_techniques']
-                ) > 0
-            ).scalar()
-            
-            with_cve = session.query(func.count(DetectionRule.id)).filter(
-                func.jsonb_array_length(
-                    DetectionRule.rule_metadata['extracted_cve_ids']
-                ) > 0
-            ).scalar()
-            
-            with_both = session.query(func.count(DetectionRule.id)).filter(
-                and_(
-                    func.jsonb_array_length(
-                        DetectionRule.rule_metadata['extracted_mitre_techniques']
-                    ) > 0,
-                    func.jsonb_array_length(
-                        DetectionRule.rule_metadata['extracted_cve_ids']
-                    ) > 0
+                RuleMitreMapping.rule_id.in_(
+                    session.query(distinct(RuleCveMapping.rule_id))
                 )
-            ).scalar()
+            ).scalar() or 0
             
-            no_enrichment = total_rules - (with_mitre + with_cve - with_both)
-            
-            # Recent updates (last 7 days)
-            seven_days_ago = datetime.now() - timedelta(days=7)
-            recent_updates = session.query(func.count(DetectionRule.id)).filter(
-                DetectionRule.updated_date >= seven_days_ago
-            ).scalar()
-            
-            # Coverage metrics
+            # MITRE coverage
             total_techniques = session.query(func.count(MitreTechnique.id)).filter(
                 MitreTechnique.is_deprecated == False,
                 MitreTechnique.revoked == False
-            ).scalar()
+            ).scalar() or 0
             
             covered_techniques = session.query(
-                func.count(func.distinct(RuleMitreMapping.technique_id))
-            ).scalar()
+                func.count(distinct(RuleMitreMapping.technique_id))
+            ).scalar() or 0
             
-            mitre_coverage = round(
-                (covered_techniques / total_techniques * 100) if total_techniques > 0 else 0,
-                2
+            coverage_percentage = round(
+                (covered_techniques / total_techniques * 100) if total_techniques > 0 else 0, 
+                1
             )
             
-            total_cves = session.query(func.count(CveEntry.id)).scalar()
-            covered_cves = session.query(
-                func.count(func.distinct(RuleCveMapping.cve_id))
-            ).scalar()
+            # Recent activity (7 days)
+            seven_days_ago = datetime.now() - timedelta(days=7)
             
-            cve_coverage = round(
-                (covered_cves / total_cves * 100) if total_cves > 0 else 0,
-                2
-            )
+            trend_query = text("""
+                WITH date_series AS (
+                    SELECT generate_series(
+                        date_trunc('day', NOW() - INTERVAL '6 days'),
+                        date_trunc('day', NOW()),
+                        '1 day'::interval
+                    )::date AS date
+                )
+                SELECT 
+                    ds.date,
+                    COUNT(CASE WHEN dr.created_date::date = ds.date THEN 1 END) as created,
+                    COUNT(CASE WHEN dr.updated_date::date = ds.date 
+                               AND dr.updated_date != dr.created_date THEN 1 END) as updated
+                FROM date_series ds
+                LEFT JOIN detection_rules dr ON (
+                    dr.created_date::date = ds.date 
+                    OR (dr.updated_date::date = ds.date AND dr.updated_date != dr.created_date)
+                )
+                GROUP BY ds.date
+                ORDER BY ds.date
+            """)
+            
+            trend_results = session.execute(trend_query).fetchall()
+            
+            daily_activity = [
+                {
+                    'date': row.date.isoformat(),
+                    'rules_created': row.created,
+                    'rules_updated': row.updated
+                }
+                for row in trend_results
+            ]
             
             response_data = {
-                'total_rules': total_rules,
-                'active_rules': active_rules,
-                'rules_by_severity': rules_by_severity,
-                'rules_by_source': rules_by_source,
-                'rules_by_type': rules_by_type,
-                'enrichment_stats': {
-                    'with_mitre': with_mitre,
-                    'with_cve': with_cve,
-                    'with_both': with_both,
-                    'no_enrichment': no_enrichment
+                'metrics': {
+                    'total_rules': base_metrics.total_rules,
+                    'active_rules': base_metrics.active_rules,
+                    'inactive_rules': base_metrics.inactive_rules,
+                    'rules_with_mitre': mitre_enriched,
+                    'rules_with_cves': cve_enriched,
+                    'rules_with_both': both_enriched
                 },
-                'recent_updates': recent_updates,
-                'coverage_metrics': {
-                    'mitre_coverage': mitre_coverage,
-                    'cve_coverage': cve_coverage
+                'distributions': {
+                    'by_severity': by_severity,
+                    'by_platform': by_platform,
+                    'by_source': by_source
+                },
+                'coverage': {
+                    'total_techniques': total_techniques,
+                    'covered_techniques': covered_techniques,
+                    'coverage_percentage': coverage_percentage
+                },
+                'trends': {
+                    'daily_activity': daily_activity
                 }
             }
             
