@@ -1,2 +1,3 @@
-# endpoints/__init__.py
-# Endpoint modules package
+from . import rules, mitre, cve, filters
+
+__all__ = ['rules', 'mitre', 'cve', 'filters']
