@@ -153,6 +153,11 @@ ROUTES = {
 def lambda_handler(event: Dict[str, Any], context: object) -> Dict[str, Any]:
     """Lambda handler"""
     
+    # Debug logging
+    logger.info(f"Raw event: {json.dumps(event)}")
+    logger.info(f"Query params: {event.get('queryStringParameters')}")
+    logger.info(f"Multi-value params: {event.get('multiValueQueryStringParameters')}")
+    
     method = event.get('httpMethod', 'GET')
     path = event.get('path', '/').rstrip('/')
     
