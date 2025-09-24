@@ -200,8 +200,66 @@ class SigmaRuleProcessor:
                     'rule_id': rule_id,
                     'cves': cves
                 })
-    
+
+    def _extract_platforms(self, logsource: Dict[str, Any]) -> List[str]:
+        """Extract platforms from Sigma logsource definition"""
+        platforms = []
+        if 'product' in logsource:
+            product = logsource['product'].lower()
+            # Map Sigma products to platforms
+            platform_mapping = {
+                'windows': 'windows',
+                'linux': 'linux',
+                'macos': 'macos',
+                'mac': 'macos',
+                'aws': 'aws',
+                'azure': 'azure',
+                'gcp': 'gcp',
+                'okta': 'cloud',
+                'zeek': 'network',
+                'apache': 'application',
+                'nginx': 'application'
+            }
+            if product in platform_mapping:
+                platforms.append(platform_mapping[product])
+            else:
+                platforms.append(product)
+        return platforms    
+
+    def _extract_data_sources(self, logsource: Dict[str, Any]) -> List[str]:
+        """Extract data sources from Sigma logsource definition"""
+        sources = []
+        if 'service' in logsource:
+            sources.append(f"service:{logsource['service']}")
+        if 'category' in logsource:
+            sources.append(f"category:{logsource['category']}")
+        if 'product' in logsource:
+            sources.append(f"product:{logsource['product']}")
+        return sources if sources else ['unknown']
+            
+    def _parse_date(self, date_value: Any) -> Optional[datetime]:
+        """Parse Sigma date fields to datetime"""
+        if not date_value:
+            return None
+        
+        date_str = str(date_value)
+        try:
+            # Handle common date formats in Sigma rules
+            for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%Y-%m-%dT%H:%M:%S']:
+                try:
+                    return datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+            # Fallback to dateutil parser if available
+            from dateutil.parser import parse
+            return parse(date_str).replace(tzinfo=timezone.utc)
+        except:
+            return None
+
     def _build_metadata(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        """Build rule metadata with proper field extraction"""
+        logsource = rule.get('logsource', {})
+        
         return {
             'source_org': 'SigmaHQ',
             'source_path': rule['file_path'],
@@ -209,32 +267,42 @@ class SigmaRuleProcessor:
             'content_hash': rule['content_hash'],
             'status': rule['status'],
             'author': rule['author'],
-            'date': rule['date'],
-            'modified': rule['modified'],
-            'logsource': rule['logsource'],
-            'detection': rule['detection'],
+            'original_date': str(rule.get('date', '')),
+            'original_modified': str(rule.get('modified', '')),
+            'logsource': logsource,
             'falsepositives': rule['falsepositives'],
             'references': rule['references'],
-            'data_sources': rule['data_sources'],
+            'rule_platforms': self._extract_platforms(logsource),
+            'data_sources': self._extract_data_sources(logsource),
             'mitre_techniques': rule['mitre_techniques'],
             'license': 'DRL 1.1',
             'validation': {
                 'syntax_valid': True,
                 'tested': rule['status'] in ['stable', 'test']
-            }
+            },
+            'detection_logic': rule['detection']  # Store original detection for reference
         }
-    
+        
     def _create_rule(self, rule: Dict[str, Any], metadata: Dict[str, Any], 
-                     source_id: int, conn) -> int:
+                    source_id: int, conn) -> int:
+        """Create new detection rule with proper field mapping"""
+        # Parse dates
+        created_date = self._parse_date(rule.get('date')) or datetime.now(timezone.utc)
+        updated_date = self._parse_date(rule.get('modified')) or created_date
+        
+        # Convert detection to YAML string for storage
+        import yaml
+        detection_content = yaml.dump(rule['detection'], default_flow_style=False)
+        
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO detection_rules (
                     rule_id, source_id, name, description, rule_content,
                     rule_type, severity, confidence_score, tags, 
-                    rule_metadata, is_active
+                    rule_metadata, is_active, created_date, updated_date
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -242,19 +310,29 @@ class SigmaRuleProcessor:
                     source_id,
                     rule['name'],
                     rule['description'],
-                    rule['raw_content'],
+                    detection_content,  # Store detection logic as rule_content
                     'sigma',
                     self.SEVERITY_MAP.get(rule['severity'], 'medium'),
                     self.STATUS_CONFIDENCE.get(rule['status'], Decimal('0.5')),
                     rule['tags'],
                     Json(metadata),
-                    rule['status'] != 'deprecated'
+                    rule['status'] != 'deprecated',
+                    created_date,
+                    updated_date
                 )
             )
             return cur.fetchone()[0]
-    
+
     def _update_rule(self, rule_id: int, rule: Dict[str, Any], 
-                     metadata: Dict[str, Any], conn):
+                    metadata: Dict[str, Any], conn):
+        """Update existing rule with proper field mapping"""
+        # Parse dates
+        updated_date = self._parse_date(rule.get('modified')) or datetime.now(timezone.utc)
+        
+        # Convert detection to YAML string
+        import yaml
+        detection_content = yaml.dump(rule['detection'], default_flow_style=False)
+        
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -267,21 +345,23 @@ class SigmaRuleProcessor:
                     tags = %s,
                     rule_metadata = %s,
                     is_active = %s,
-                    updated_date = CURRENT_TIMESTAMP
+                    updated_date = %s
                 WHERE id = %s
                 """,
                 (
                     rule['name'],
                     rule['description'],
-                    rule['raw_content'],
+                    detection_content,  # Store detection logic as rule_content
                     self.SEVERITY_MAP.get(rule['severity'], 'medium'),
                     self.STATUS_CONFIDENCE.get(rule['status'], Decimal('0.5')),
                     rule['tags'],
                     Json(metadata),
                     rule['status'] != 'deprecated',
+                    updated_date,
                     rule_id
                 )
             )
+            self.stats['updated'] += 1
     
     def _extract_cves(self, rule: Dict[str, Any]) -> List[str]:
         cves = []
@@ -309,7 +389,7 @@ class SigmaRuleProcessor:
                 }
                 
                 lambda_client.invoke(
-                    FunctionName='mitre-enricher',
+                    FunctionName='pano-mitre-enricher',
                     InvocationType='Event',
                     Payload=json.dumps(payload)
                 )
@@ -328,7 +408,7 @@ class SigmaRuleProcessor:
                 }
                 
                 lambda_client.invoke(
-                    FunctionName='cve-enricher',
+                    FunctionName='pano-cve-enricher',
                     InvocationType='Event',
                     Payload=json.dumps(payload)
                 )
