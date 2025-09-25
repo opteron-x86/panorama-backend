@@ -143,6 +143,7 @@ ROUTES = {
         '/rules/{rule_id}': lambda e, p, u: rules.get_rule(e['pathParameters']['rule_id']),
         '/mitre/matrix': lambda e, p, u: mitre.get_matrix(p),
         '/mitre/techniques': lambda e, p, u: mitre.get_techniques(p),
+        '/mitre/techniques/{technique_id}': lambda e, p, u: mitre.get_technique_detail(e['pathParameters']['technique_id']), 
         '/cves': lambda e, p, u: cve.search_cves(p),
         '/cves/{cve_id}': lambda e, p, u: cve.get_cve(e['pathParameters']['cve_id']),
         '/filters': lambda e, p, u: filters.get_all_filters()

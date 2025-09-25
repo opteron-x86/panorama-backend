@@ -105,3 +105,99 @@ def get_techniques(params: Dict[str, Any]) -> Dict[str, Any]:
             ],
             'total': total
         }
+
+def get_technique_detail(technique_id: str) -> Dict[str, Any]:
+    """Get detailed information for a specific MITRE technique"""
+    
+    with db_session() as session:
+        technique = session.query(MitreTechnique).options(
+            joinedload(MitreTechnique.tactic),
+            selectinload(MitreTechnique.rule_mappings).joinedload(RuleMitreMapping.rule)
+        ).filter(
+            MitreTechnique.technique_id == technique_id
+        ).first()
+        
+        if not technique:
+            raise NotFoundError(f"Technique {technique_id} not found")
+        
+        result = {
+            'technique_id': technique.technique_id,
+            'name': technique.name,
+            'description': technique.description,
+            'tactic': {
+                'tactic_id': technique.tactic.tactic_id,
+                'name': technique.tactic.name
+            } if technique.tactic else None,
+            'platforms': technique.platforms or [],
+            'data_sources': technique.data_sources or [],
+            'kill_chain_phases': technique.kill_chain_phases or [],
+            'detection_description': technique.detection_description,
+            'mitigation_description': technique.mitigation_description,
+            'is_deprecated': technique.is_deprecated,
+            'deprecated_date': technique.deprecated_date.isoformat() if technique.deprecated_date else None,
+            'deprecation_reason': technique.deprecation_reason,
+            'revoked': technique.revoked,
+            'superseded_by': technique.superseded_by,
+            'version': technique.version,
+            'created_date': technique.created_date.isoformat() if technique.created_date else None,
+            'updated_date': technique.updated_date.isoformat() if technique.updated_date else None,
+        }
+        
+        # Add detection coverage
+        if technique.rule_mappings:
+            rules = []
+            for mapping in technique.rule_mappings:
+                if mapping.rule and mapping.rule.is_active:
+                    rules.append({
+                        'rule_id': mapping.rule.rule_id,
+                        'name': mapping.rule.name,
+                        'severity': mapping.rule.severity,
+                    })
+            
+            result['detection_rules'] = rules
+            result['coverage'] = {
+                'rule_count': len(rules),
+                'has_coverage': len(rules) > 0,
+                'coverage_level': 'high' if len(rules) >= 5 else 'medium' if len(rules) >= 2 else 'low' if len(rules) > 0 else 'none'
+            }
+        else:
+            result['detection_rules'] = []
+            result['coverage'] = {
+                'rule_count': 0,
+                'has_coverage': False,
+                'coverage_level': 'none'
+            }
+        
+        # Get related techniques
+        related = []
+        
+        # Check for parent technique
+        if technique.parent_technique_id:
+            parent = session.query(MitreTechnique).filter(
+                MitreTechnique.id == technique.parent_technique_id
+            ).first()
+            if parent:
+                related.append({
+                    'technique_id': parent.technique_id,
+                    'name': parent.name,
+                    'relationship': 'parent'
+                })
+        
+        # Check for subtechniques
+        subtechniques = session.query(MitreTechnique).filter(
+            MitreTechnique.parent_technique_id == technique.id
+        ).all()
+        for sub in subtechniques:
+            related.append({
+                'technique_id': sub.technique_id,
+                'name': sub.name,
+                'relationship': 'subtechnique'
+            })
+        
+        result['related_techniques'] = related
+        
+        # Add external references if available
+        if technique.external_references:
+            result['references'] = technique.external_references
+        
+        return result
