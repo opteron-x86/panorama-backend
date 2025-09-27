@@ -7,4 +7,4 @@
 terraform-import-backup/
 builds/
 *.zip
-.locals
+locals.tf
