@@ -1,2 +1,10 @@
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.tfvars
+!example.tfvars
+terraform-import-backup/
+builds/
 *.zip
-toml-layer/
+.locals

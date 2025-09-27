@@ -1,5 +1,5 @@
 """
-Sigma Rules Collector Lambda
+Sigma Rules Collector Lambda - Managed by Terraform
 """
 import json
 import logging

@@ -1,5 +1,6 @@
 """
-Sigma Rules Processor - Database import handler
+Sigma Rules Processor
+Managed by Terraform
 """
 import json
 import logging

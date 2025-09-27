@@ -1,5 +1,6 @@
 """
-Snort Rules Processor - Database import handler
+Snort Rules Processor
+Managed by Terraform
 """
 import json
 import logging
