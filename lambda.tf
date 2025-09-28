@@ -21,7 +21,7 @@ resource "aws_lambda_function" "pano_api_handler" {
       DB_NAME       = aws_db_instance.panorama.db_name
       DB_SECRET_ARN = local.db_secret_arn
       DB_USER       = aws_db_instance.panorama.username
-      DISABLE_AUTH  = false
+      DISABLE_AUTH  = true
     }
   }
   
