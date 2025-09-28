@@ -8,3 +8,5 @@ terraform-import-backup/
 builds/
 *.zip
 locals.tf
+lambda-layers/build/
+lambda-layers/build.sh

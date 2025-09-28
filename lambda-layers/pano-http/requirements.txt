@@ -1,0 +1,4 @@
+# HTTP & Networking
+requests
+urllib3
+httpx

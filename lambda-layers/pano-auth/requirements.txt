@@ -1,0 +1,4 @@
+# Authentication & Security
+pyjwt
+cryptography
+bcrypt

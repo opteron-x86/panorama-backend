@@ -1,0 +1,4 @@
+# Rule processing specific
+ply
+pyparsing
+regex

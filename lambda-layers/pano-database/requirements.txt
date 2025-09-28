@@ -1,0 +1,10 @@
+# lambda-layers/pano-dependencies/requirements.txt
+
+# Database
+psycopg2-binary
+sqlalchemy
+pymongo
+
+# AWS SDK
+# boto3==1.34.144
+# botocore==1.34.144

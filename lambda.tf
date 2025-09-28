@@ -12,7 +12,7 @@ resource "aws_lambda_function" "pano_api_handler" {
   runtime       = "python3.13"
   role          = local.lambda_execrole_arn
   memory_size   = 256
-  timeout       = 6
+  timeout       = 30
   tags = var.common_tags
 
   environment {

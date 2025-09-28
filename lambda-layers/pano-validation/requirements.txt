@@ -1,0 +1,4 @@
+# Validation
+jsonschema
+pydantic
+marshmallow

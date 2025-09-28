@@ -1,0 +1,4 @@
+# Utilities
+python-dotenv
+validators
+netaddr
