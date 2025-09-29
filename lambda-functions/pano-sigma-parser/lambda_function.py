@@ -9,7 +9,7 @@ import boto3
 import hashlib
 import re
 import yaml
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger()
@@ -20,6 +20,14 @@ eventbridge_client = boto3.client('events')
 
 STAGING_BUCKET = os.environ.get('STAGING_BUCKET', 'panorama-rulesets')
 EVENT_BUS = os.environ.get('EVENT_BUS', 'panorama-rules-processing')
+
+
+class DateEncoder(json.JSONEncoder):
+    """Custom JSON encoder to handle date/datetime objects"""
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        return super().default(obj)
 
 
 class SigmaParser:
@@ -114,56 +122,60 @@ class SigmaParser:
         if not self._validate_rule(rule):
             return None
         
-        # Extract rule ID
-        rule_id = rule.get('id', hashlib.md5(rule_entry['content'].encode()).hexdigest())
+        # Generate unique ID
+        rule_id = self._generate_rule_id(rule_entry)
         
-        # Extract basic fields
-        title = rule.get('title', 'Untitled Sigma Rule')
+        # Extract key fields
+        title = rule.get('title', 'Untitled')
         description = rule.get('description', '')
-        
-        # Determine severity
-        level = rule.get('level', 'medium')
-        severity = self.SEVERITY_MAP.get(level, 'medium')
-        
-        # Calculate confidence score
         status = rule.get('status', 'experimental')
-        confidence_score = self.STATUS_CONFIDENCE.get(status, 0.5)
+        level = rule.get('level', 'medium')
+        logsource = rule.get('logsource', {})
+        
+        # Convert dates to strings
+        date_val = rule.get('date')
+        if isinstance(date_val, (datetime, date)):
+            date_str = date_val.isoformat()
+        else:
+            date_str = str(date_val) if date_val else ''
+        
+        modified_val = rule.get('modified')
+        if isinstance(modified_val, (datetime, date)):
+            modified_str = modified_val.isoformat()
+        else:
+            modified_str = str(modified_val) if modified_val else ''
+        
+        # Extract platforms and data sources
+        platforms = self._extract_platforms(logsource)
+        data_sources = self._extract_data_sources(logsource)
         
         # Extract MITRE techniques
         mitre_techniques = self._extract_mitre_techniques(rule)
         
-        # Extract logsource info
-        logsource = rule.get('logsource', {})
-        platforms = self._extract_platforms(logsource)
-        data_sources = self._extract_data_sources(logsource)
-        
         # Build tags
         tags = self._build_tags(rule, category)
         
-        # Extract references
-        references = rule.get('references', [])
-        
-        # Extract false positives
-        false_positives = rule.get('falsepositives', [])
-        
         return {
-            'original_id': f"sigma:{rule_id}",
+            'original_id': rule_id,  # Changed from 'rule_id' to match normalized schema
+            'source': 'sigma',
+            'source_version': '1.0',
+            
             'title': title,
             'description': description,
-            'severity': severity,
-            'confidence_score': confidence_score,
+            'severity': self.SEVERITY_MAP.get(level, 'medium'),
+            'confidence_score': self.STATUS_CONFIDENCE.get(status, 0.5),
+            
             'tags': tags,
             'mitre_techniques': mitre_techniques,
-            'false_positives': false_positives,
-            'references': references,
-            'cve_references': [],  # Sigma rules rarely contain direct CVE refs
-            'source': 'sigma',
-            'source_version': rule.get('modified', rule.get('date', '')),
-            'status': 'active' if status != 'deprecated' else 'inactive',
+            'platforms': platforms,
+            'data_sources': data_sources,
+            
+            'false_positives': rule.get('falsepositives', []),
+            'references': rule.get('references', []),
             
             'detection_logic': {
                 'format': 'sigma',
-                'content': yaml.dump(rule.get('detection', {})),
+                'content': self._sanitize_detection(rule.get('detection', {})),
                 'raw_rule': rule_entry['content'],
                 'parsed': {
                     'detection': rule.get('detection', {}),
@@ -177,8 +189,8 @@ class SigmaParser:
                 'status': status,
                 'level': level,
                 'author': rule.get('author', 'Unknown'),
-                'date': str(rule.get('date', '')),
-                'modified': str(rule.get('modified', '')),
+                'date': date_str,
+                'modified': modified_str,
                 'file_path': rule_entry.get('path', ''),
                 'filename': rule_entry.get('filename', ''),
                 'category': category,
@@ -191,6 +203,23 @@ class SigmaParser:
                 'related': rule.get('related', [])
             }
         }
+    
+    def _sanitize_detection(self, detection: Dict) -> Dict:
+        """Sanitize detection logic to ensure JSON serializable"""
+        if not detection:
+            return {}
+        
+        # Convert any date objects in detection to strings
+        def convert_dates(obj):
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, dict):
+                return {k: convert_dates(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_dates(item) for item in obj]
+            return obj
+        
+        return convert_dates(detection)
     
     def _validate_rule(self, rule: Dict) -> bool:
         """Validate Sigma rule has required fields"""
@@ -214,48 +243,62 @@ class SigmaParser:
         
         for tag in tags:
             if isinstance(tag, str) and tag.startswith('attack.'):
-                # Preserve original tag format for enricher
-                techniques.append(tag)
+                # Remove attack. prefix and format
+                technique = tag.replace('attack.', '').upper()
+                if technique.startswith('T') and technique[1:].split('.')[0].isdigit():
+                    techniques.append(technique)
         
         return techniques
     
+    def _generate_rule_id(self, rule_entry: Dict) -> str:
+        """Generate unique rule ID"""
+        
+        # Use SHA256 hash if available
+        if rule_entry.get('sha256'):
+            return f"sigma_{rule_entry['sha256'][:16]}"
+        
+        # Fallback to hash of content
+        content = rule_entry.get('content', '')
+        hash_obj = hashlib.sha256(content.encode('utf-8'))
+        return f"sigma_{hash_obj.hexdigest()[:16]}"
+    
     def _extract_platforms(self, logsource: Dict) -> List[str]:
-        """Extract target platforms from logsource"""
+        """Extract platform information from logsource"""
         
         platforms = []
-        
         product = logsource.get('product', '').lower()
         service = logsource.get('service', '').lower()
-        category = logsource.get('category', '').lower()
         
         # Map products to platforms
-        if product == 'windows' or service in ['security', 'system', 'sysmon']:
+        if product in ['windows', 'windows-defender']:
             platforms.append('windows')
-        elif product == 'linux' or service in ['auditd', 'syslog']:
+        elif product in ['linux', 'auditd', 'sysmon-linux']:
             platforms.append('linux')
-        elif product == 'macos':
+        elif product in ['macos', 'mac']:
             platforms.append('macos')
-        elif product in ['aws', 'azure', 'gcp']:
-            platforms.append('cloud')
-        elif category == 'firewall' or product == 'firewall':
-            platforms.append('network')
-        elif category == 'webserver' or service in ['apache', 'nginx', 'iis']:
-            platforms.append('web')
+        elif product in ['aws', 'amazon']:
+            platforms.append('cloud:aws')
+        elif product in ['azure', 'microsoft365', 'office365']:
+            platforms.append('cloud:azure')
+        elif product in ['gcp', 'google']:
+            platforms.append('cloud:gcp')
         
-        # Default to generic if no specific platform
-        if not platforms:
-            platforms.append('generic')
+        # Check services as fallback
+        if not platforms and service:
+            if 'windows' in service or 'powershell' in service:
+                platforms.append('windows')
+            elif 'linux' in service or 'ssh' in service:
+                platforms.append('linux')
         
-        return platforms
+        return platforms or ['generic']
     
     def _extract_data_sources(self, logsource: Dict) -> List[str]:
-        """Extract data sources from logsource"""
+        """Extract data source information"""
         
         sources = []
-        
-        product = logsource.get('product')
-        service = logsource.get('service')
-        category = logsource.get('category')
+        product = logsource.get('product', '')
+        service = logsource.get('service', '')
+        category = logsource.get('category', '')
         
         if product:
             sources.append(f"product:{product}")
@@ -264,25 +307,16 @@ class SigmaParser:
         if category:
             sources.append(f"category:{category}")
         
-        # Add specific data source mappings
-        if service == 'sysmon':
-            sources.append('sysmon:process_creation')
-        elif service == 'security':
-            sources.append('windows:security')
-        elif service == 'auditd':
-            sources.append('linux:auditd')
-        
-        return sources if sources else ['logs:generic']
+        return sources or ['unknown']
     
     def _build_tags(self, rule: Dict, category: str) -> List[str]:
-        """Build tags from rule and metadata"""
+        """Build comprehensive tag list"""
         
         tags = []
         
-        # Add original tags
-        original_tags = rule.get('tags', [])
-        for tag in original_tags:
-            if isinstance(tag, str) and not tag.startswith('attack.'):
+        # Add MITRE tags
+        for tag in rule.get('tags', []):
+            if isinstance(tag, str) and ('attack.' in tag or 'car.' in tag):
                 tags.append(tag)
         
         # Add status tag
@@ -346,10 +380,11 @@ def lambda_handler(event, context):
             'rules': parsed_rules
         }
         
+        # Use custom encoder for dates
         s3_client.put_object(
             Bucket=s3_bucket,
             Key=parsed_key,
-            Body=json.dumps(parsed_data),
+            Body=json.dumps(parsed_data, cls=DateEncoder),
             ContentType='application/json',
             Metadata={
                 'source': 'sigma',
@@ -371,7 +406,7 @@ def lambda_handler(event, context):
                     'rule_count': len(parsed_rules),
                     'statistics': parser.stats,
                     'timestamp': datetime.now(timezone.utc).isoformat()
-                }),
+                }, cls=DateEncoder),
                 'EventBusName': EVENT_BUS
             }]
         )
