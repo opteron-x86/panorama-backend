@@ -28,14 +28,12 @@ def get_matrix(params: Dict[str, Any]) -> Dict[str, Any]:
             MitreTechnique.revoked == False
         )
         
-        if params.get('platforms'):
-            # Filter techniques that have any of the requested platforms
-            platform_filters = []
-            for platform in params['platforms']:
-                platform_filters.append(
-                    MitreTechnique.platforms.any(platform)
-                )
-            techniques_query = techniques_query.filter(or_(*platform_filters))
+        # Fix: Handle single platform parameter
+        if params.get('platform'):
+            platform = params['platform']
+            techniques_query = techniques_query.filter(
+                MitreTechnique.platforms.any(platform)
+            )
         
         techniques = techniques_query.all()
         

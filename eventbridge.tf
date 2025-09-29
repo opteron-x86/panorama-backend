@@ -13,11 +13,8 @@ resource "aws_cloudwatch_event_rule" "sigma_parser_trigger" {
   event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
 
   event_pattern = jsonencode({
-    source      = ["rules.downloader"]
+    source      = ["rules.downloader.sigma"]
     detail-type = ["com.security.rules.downloaded"]
-    detail = {
-      source = ["sigma"]
-    }
   })
 
   tags = var.common_tags
@@ -48,7 +45,9 @@ resource "aws_cloudwatch_event_rule" "universal_processor_trigger" {
 
   event_pattern = jsonencode({
     source = [
-      "rules.parser.sigma"
+      "rules.parser.sigma",
+      "rules.parser.elastic",
+      "rules.parser.snort"
     ]
     detail-type = ["com.security.rules.parsed"]
   })

@@ -94,6 +94,7 @@ resource "aws_lambda_function" "pano_universal_processor" {
   }
 
   layers = [
+    local.lambda_layers.yaml,
     local.lambda_layers.dependencies,
     local.lambda_layers.datamodel
   ]
@@ -345,6 +346,9 @@ resource "aws_lambda_function" "pano_api_handler" {
       CORS_ORIGIN     = var.cors_origin
       ENABLE_CACHING  = "true"
       CACHE_TTL       = "300"
+      COGNITO_USER_POOL_ID = local.cognito_user_pool_id
+      COGNITO_CLIENT_ID = local.cognito_client_id
+      DISABLE_AUTH = false
     }
   }
 
@@ -354,6 +358,7 @@ resource "aws_lambda_function" "pano_api_handler" {
   }
 
   layers = [
+    local.lambda_layers.jwt,
     local.lambda_layers.dependencies,
     local.lambda_layers.datamodel
   ]

@@ -38,46 +38,37 @@ def search_rules(params: Dict[str, Any]) -> Dict[str, Any]:
         
         # Basic filters
         if params.get('rule_types'):
-            query = query.filter(DetectionRule.rule_type.in_(params['rule_types']))
-        
+            rule_types = params['rule_types'].split(',') if isinstance(params['rule_types'], str) else params['rule_types']
+            query = query.filter(DetectionRule.rule_type.in_(rule_types))
+
         if params.get('severities'):
-            query = query.filter(DetectionRule.severity.in_(params['severities']))
-        
+            severities = params['severities'].split(',') if isinstance(params['severities'], str) else params['severities']
+            query = query.filter(DetectionRule.severity.in_(severities))
+
         if params.get('source_ids'):
-            query = query.filter(DetectionRule.source_id.in_(params['source_ids']))
+            source_ids = params['source_ids'].split(',') if isinstance(params['source_ids'], str) else params['source_ids']
+            query = query.filter(DetectionRule.source_id.in_(source_ids))
         
         if 'is_active' in params:
             query = query.filter(DetectionRule.is_active == params['is_active'])
         
         if params.get('tags'):
+            tags = params['tags'].split(',') if isinstance(params['tags'], str) else params['tags']
             tag_conditions = []
-            for tag in params['tags']:
+            for tag in tags:
                 tag_conditions.append(func.array_position(DetectionRule.tags, tag) != None)
             query = query.filter(or_(*tag_conditions))
         
-        # MITRE filter with join tracking
         if params.get('mitre_techniques'):
-            query = (query
-                .join(RuleMitreMapping)
-                .join(MitreTechnique)
-                .filter(MitreTechnique.technique_id.in_(params['mitre_techniques']))
-                .options(
-                    contains_eager(DetectionRule.mitre_mappings)
-                    .joinedload(RuleMitreMapping.technique)
-                ))
-            mitre_joined = True
+            technique_ids = params['mitre_techniques'].split(',') if isinstance(params['mitre_techniques'], str) else params['mitre_techniques']
+            
+            query = query.join(RuleMitreMapping).join(MitreTechnique)\
+                .filter(MitreTechnique.technique_id.in_(technique_ids))
         
-        # CVE filter with join tracking
         if params.get('cve_ids'):
-            query = (query
-                .join(RuleCveMapping)
-                .join(CveEntry)
-                .filter(CveEntry.cve_id.in_(params['cve_ids']))
-                .options(
-                    contains_eager(DetectionRule.cve_mappings)
-                    .joinedload(RuleCveMapping.cve)
-                ))
-            cve_joined = True
+            cve_ids = params['cve_ids'].split(',') if isinstance(params['cve_ids'], str) else params['cve_ids']
+            query = query.join(RuleCveMapping).join(CveEntry)\
+                .filter(CveEntry.cve_id.in_(cve_ids))
         
         # Count before pagination
         total = query.count()
@@ -95,8 +86,8 @@ def search_rules(params: Dict[str, Any]) -> Dict[str, Any]:
         query = query.order_by(order(sort_col))
         
         # Paginate
-        offset = params.get('offset', 0)
-        limit = min(params.get('limit', 25), 1000)
+        limit = min(int(params.get('limit', 25)), 1000)
+        offset = int(params.get('offset', 0))
         
         # Add loading options only for non-joined relationships
         if not mitre_joined:
