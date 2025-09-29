@@ -7,6 +7,6 @@
 terraform-import-backup/
 builds/
 *.zip
+*.7z
 locals.tf
-lambda-layers/build/
-lambda-layers/build.sh
+lambda-layers/
