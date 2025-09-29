@@ -92,19 +92,6 @@ resource "aws_cloudwatch_dashboard" "rules_pipeline" {
   })
 }
 
-# Log groups with retention
-resource "aws_cloudwatch_log_group" "sigma_parser" {
-  name              = "/aws/lambda/pano-sigma-parser"
-  retention_in_days = 14
-  tags              = var.common_tags
-}
-
-resource "aws_cloudwatch_log_group" "universal_processor" {
-  name              = "/aws/lambda/pano-universal-processor"
-  retention_in_days = 14
-  tags              = var.common_tags
-}
-
 resource "aws_cloudwatch_log_group" "rule_downloader" {
   name              = "/aws/lambda/pano-rule-downloader"
   retention_in_days = 14

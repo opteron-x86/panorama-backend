@@ -91,82 +91,6 @@ resource "aws_sns_topic_subscription" "alerts_email" {
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-# Archive files for Lambda functions
-data "archive_file" "pano_sigma_parser" {
-  type        = "zip"
-  source_dir  = "${path.module}/lambda-functions/pano-sigma-parser"
-  output_path = "${path.module}/builds/pano-sigma-parser.zip"
-}
-
-data "archive_file" "pano_universal_processor" {
-  type        = "zip"
-  source_dir  = "${path.module}/lambda-functions/pano-universal-processor"
-  output_path = "${path.module}/builds/pano-universal-processor.zip"
-}
-
-data "archive_file" "pano_snort_parser" {
-  type        = "zip"
-  source_dir  = "${path.module}/lambda-functions/pano-snort-parser"
-  output_path = "${path.module}/builds/pano-snort-parser.zip"
-}
-
-data "archive_file" "pano_rule_downloader" {
-  type        = "zip"
-  source_dir  = "${path.module}/lambda-functions/pano-rule-downloader"
-  output_path = "${path.module}/builds/pano-rule-downloader.zip"
-}
-
-# Lambda function for rule downloader
-resource "aws_lambda_function" "pano_rule_downloader" {
-  function_name = "pano-rule-downloader"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.13"
-  role          = local.lambda_execrole_arn
-  memory_size   = 512
-  timeout       = 180
-  tags          = var.common_tags
-
-  environment {
-    variables = {
-      STAGING_BUCKET = aws_s3_bucket.staging.bucket
-      EVENT_BUS      = aws_cloudwatch_event_bus.rules_processing.name
-    }
-  }
-
-  layers = [
-    local.lambda_layers.dependencies,
-    local.lambda_layers.yaml
-  ]
-
-  filename         = data.archive_file.pano_rule_downloader.output_path
-  source_code_hash = data.archive_file.pano_rule_downloader.output_base64sha256
-}
-
-# Lambda function for Snort parser (placeholder)
-resource "aws_lambda_function" "pano_snort_parser" {
-  function_name = "pano-snort-parser"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.13"
-  role          = local.lambda_execrole_arn
-  memory_size   = 512
-  timeout       = 120
-  tags          = var.common_tags
-
-  environment {
-    variables = {
-      STAGING_BUCKET = aws_s3_bucket.staging.bucket
-      EVENT_BUS      = aws_cloudwatch_event_bus.rules_processing.name
-    }
-  }
-
-  layers = [
-    local.lambda_layers.dependencies
-  ]
-
-  filename         = data.archive_file.pano_snort_parser.output_path
-  source_code_hash = data.archive_file.pano_snort_parser.output_base64sha256
-}
-
 
 # EventBridge schedule for automated downloads
 resource "aws_cloudwatch_event_rule" "sigma_download_schedule" {
@@ -179,18 +103,18 @@ resource "aws_cloudwatch_event_rule" "sigma_download_schedule" {
 
 resource "aws_cloudwatch_event_target" "sigma_download" {
   rule      = aws_cloudwatch_event_rule.sigma_download_schedule.name
-  target_id = "rule-downloader"
-  arn       = aws_lambda_function.pano_rule_downloader.arn
+  target_id = "sigma-downloader"
+  arn = aws_lambda_function.pano_sigma_downloader.arn
   
   input = jsonencode({
     source = "sigma"
   })
 }
 
-resource "aws_lambda_permission" "eventbridge_rule_downloader" {
+resource "aws_lambda_permission" "eventbridge_sigma_downloader" {
   statement_id  = "AllowExecutionFromEventBridgeSchedule"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.pano_rule_downloader.function_name
+  function_name = aws_lambda_function.pano_sigma_downloader.function_name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.sigma_download_schedule.arn
 }

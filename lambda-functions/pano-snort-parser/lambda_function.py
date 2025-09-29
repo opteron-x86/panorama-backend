@@ -1,15 +1,18 @@
 """
 pano-snort-parser/lambda_function.py
-Parses Snort rules to intermediate format for universal processor
+Parses Snort rules and normalizes them for the universal processor
 """
 import json
 import logging
 import os
 import boto3
+import tempfile
+import tarfile
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
+from pathlib import Path
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -18,444 +21,398 @@ s3_client = boto3.client('s3')
 eventbridge_client = boto3.client('events')
 
 STAGING_BUCKET = os.environ.get('STAGING_BUCKET', 'panorama-rulesets')
-EVENT_BUS = os.environ.get('EVENT_BUS', 'default')
-
+EVENT_BUS = os.environ.get('EVENT_BUS', 'panorama-rules-processing')
 
 class SnortRuleParser:
-    """Parse individual Snort rules"""
+    """Parse and normalize Snort rules"""
     
-    CLASSTYPE_SEVERITY = {
-        'trojan-activity': 'critical',
-        'unsuccessful-admin': 'high',
-        'successful-admin': 'critical',
-        'attempted-admin': 'high',
-        'successful-user': 'high',
-        'attempted-user': 'medium',
-        'unsuccessful-user': 'medium',
-        'web-application-attack': 'high',
-        'attempted-dos': 'high',
-        'successful-dos': 'critical',
-        'attempted-recon': 'low',
-        'successful-recon-limited': 'low',
-        'successful-recon-largescale': 'medium',
-        'denial-of-service': 'high',
-        'rpc-portmap-decode': 'medium',
-        'suspicious-filename-detect': 'medium',
-        'suspicious-login': 'medium',
-        'system-call-detect': 'low',
-        'network-scan': 'low',
-        'protocol-command-decode': 'low',
-        'misc-activity': 'info',
-        'misc-attack': 'medium',
-        'policy-violation': 'info',
-        'default-login-attempt': 'medium',
-        'bad-unknown': 'medium',
-        'string-detect': 'low',
-        'unknown': 'info'
-    }
+    # Snort rule pattern - handles standard format
+    RULE_PATTERN = re.compile(
+        r'^(alert|log|pass|drop|reject|sdrop)\s+'  # action
+        r'(\S+)\s+'                                  # protocol
+        r'(\S+)\s+(\S+)\s+'                         # src addr/port
+        r'(->|<>)\s+'                                # direction
+        r'(\S+)\s+(\S+)\s+'                         # dst addr/port
+        r'\((.*)\)$',                                # options
+        re.DOTALL
+    )
     
-    def parse_rule(self, rule_line: str, file_path: str = '') -> Optional[Dict[str, Any]]:
-        """Parse single Snort rule line"""
-        rule_line = rule_line.strip()
-        
-        if not rule_line or rule_line.startswith('#'):
-            return None
-        
-        # Extract basic structure: action proto src -> dst (options)
-        match = re.match(
-            r'^(\w+)\s+(\w+)\s+([^\s]+)\s+([^\s]+)\s+->\s+([^\s]+)\s+([^\s]+)\s+\((.*)\),
-            rule_line
-        )
-        
-        if not match:
-            return None
-        
-        action, protocol, src_ip, src_port, dst_ip, dst_port, options_str = match.groups()
-        
-        # Parse options
-        options = self._parse_options(options_str)
-        
-        # Extract key fields
-        sid = options.get('sid', '')
-        if not sid:
-            return None
-            
-        msg = options.get('msg', '').strip('"')
-        classtype = options.get('classtype', 'unknown')
-        
-        # Parse references
-        references = []
-        for key, value in options.items():
-            if key == 'reference':
-                references.append(value)
-        
-        # Extract CVEs from references
-        cves = self._extract_cves(msg, references)
-        
-        # Determine severity
-        severity = self._determine_severity(classtype, options)
-        
-        return {
-            'sid': sid,
-            'action': action,
-            'protocol': protocol,
-            'source_ip': src_ip,
-            'source_port': src_port,
-            'destination_ip': dst_ip,
-            'destination_port': dst_port,
-            'message': msg,
-            'classtype': classtype,
-            'severity': severity,
-            'options': options,
-            'references': references,
-            'cves': cves,
-            'raw_rule': rule_line,
-            'file_path': file_path
-        }
+    # Option patterns
+    SID_PATTERN = re.compile(r'sid:\s*(\d+)')
+    MSG_PATTERN = re.compile(r'msg:\s*"([^"]+)"')
+    CLASSTYPE_PATTERN = re.compile(r'classtype:\s*([^;]+)')
+    PRIORITY_PATTERN = re.compile(r'priority:\s*(\d+)')
+    REF_PATTERN = re.compile(r'reference:\s*([^;]+)')
+    CVE_PATTERN = re.compile(r'cve[,-]\d{4}-\d+', re.IGNORECASE)
     
-    def _parse_options(self, options_str: str) -> Dict[str, Any]:
-        """Parse Snort rule options"""
-        options = {}
-        
-        # Split by semicolon but handle quoted strings
-        parts = re.split(r';\s*', options_str)
-        
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-                
-            # Handle key:value pairs
-            if ':' in part:
-                key, value = part.split(':', 1)
-                key = key.strip()
-                value = value.strip()
-                
-                # Handle multiple values for same key (e.g., multiple references)
-                if key == 'reference':
-                    if 'reference' not in options:
-                        options['reference'] = []
-                    options['reference'].append(value)
-                else:
-                    options[key] = value
-            else:
-                # Boolean flag
-                options[part] = True
-        
-        return options
-    
-    def _extract_cves(self, msg: str, references: List[str]) -> List[str]:
-        """Extract CVE IDs from message and references"""
-        cve_pattern = r'CVE-\d{4}-\d{4,}'
-        cves = set()
-        
-        # Check message
-        cves.update(re.findall(cve_pattern, msg, re.IGNORECASE))
-        
-        # Check references
-        for ref in references:
-            cves.update(re.findall(cve_pattern, ref, re.IGNORECASE))
-        
-        return list(cves)
-    
-    def _determine_severity(self, classtype: str, options: Dict) -> str:
-        """Determine rule severity"""
-        # Check priority if specified
-        if 'priority' in options:
-            priority = int(options['priority'])
-            if priority == 1:
-                return 'critical'
-            elif priority == 2:
-                return 'high'
-            elif priority == 3:
-                return 'medium'
-            else:
-                return 'low'
-        
-        # Use classtype mapping
-        return self.CLASSTYPE_SEVERITY.get(classtype, 'medium')
 
-
-class SnortParser:
-    """Parse Snort rulesets to intermediate format"""
     
     def __init__(self):
-        self.rule_parser = SnortRuleParser()
         self.stats = {
-            'total': 0,
             'parsed': 0,
-            'errors': 0,
-            'files': set()
+            'failed': 0,
+            'total': 0
         }
     
-    def parse_ruleset(self, rules_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Parse entire ruleset to intermediate format"""
+    def parse_rules(self, rules_content: str) -> List[Dict[str, Any]]:
+        """Parse Snort rules from content"""
+        
         parsed_rules = []
-        ruleset_id = self._generate_ruleset_id(rules_data)
+        current_rule = []
         
-        # Process all rules
-        for category, rules in rules_data.get('rules', {}).items():
-            self.stats['files'].add(category)
+        for line in rules_content.split('\n'):
+            line = line.strip()
             
-            for rule in rules:
-                self.stats['total'] += 1
-                try:
-                    # Parse if we have raw rule content
-                    if 'rule_content' in rule:
-                        parsed_rule = self.rule_parser.parse_rule(
-                            rule['rule_content'],
-                            rule.get('file_path', '')
-                        )
-                        if parsed_rule:
-                            # Convert to intermediate format
-                            intermediate = self._to_intermediate_format(parsed_rule)
-                            parsed_rules.append(intermediate)
-                            self.stats['parsed'] += 1
-                    elif 'raw_rule' in rule:
-                        # Already parsed format from downloader
-                        intermediate = self._normalize_downloaded_rule(rule)
-                        parsed_rules.append(intermediate)
-                        self.stats['parsed'] += 1
-                        
-                except Exception as e:
-                    logger.error(f"Failed to parse rule: {e}")
-                    self.stats['errors'] += 1
+            # Skip comments and empty lines
+            if not line or line.startswith('#'):
+                continue
+            
+            # Handle multi-line rules
+            if line.endswith('\\'):
+                current_rule.append(line[:-1])
+                continue
+            
+            # Complete rule
+            if current_rule:
+                line = ' '.join(current_rule) + ' ' + line
+                current_rule = []
+            
+            # Parse rule
+            parsed = self._parse_single_rule(line)
+            if parsed:
+                parsed_rules.append(parsed)
+                self.stats['parsed'] += 1
+            else:
+                self.stats['failed'] += 1
+            
+            self.stats['total'] += 1
         
-        return {
-            'ruleset_id': ruleset_id,
-            'source': 'snort',
-            'parser_version': '1.0',
-            'parsed_at': datetime.now(timezone.utc).isoformat(),
-            'statistics': {
-                'total': self.stats['total'],
-                'parsed': self.stats['parsed'],
-                'errors': self.stats['errors'],
-                'files': list(self.stats['files'])
-            },
-            'rules': parsed_rules
-        }
+        return parsed_rules
     
-    def _to_intermediate_format(self, rule: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert parsed Snort rule to intermediate format"""
-        # Build title from message or SID
-        title = rule.get('message', f"Snort Rule SID:{rule.get('sid', 'unknown')}")
+    def _parse_single_rule(self, rule_line: str) -> Optional[Dict[str, Any]]:
+        """Parse a single Snort rule"""
         
-        # Extract MITRE techniques if present in references
-        mitre_techniques = self._extract_mitre_techniques(rule.get('references', []))
+        match = self.RULE_PATTERN.match(rule_line)
+        if not match:
+            logger.debug(f"Failed to parse: {rule_line[:100]}")
+            return None
         
-        # Build tags
-        tags = [
-            f"action:{rule.get('action', 'alert')}",
-            f"protocol:{rule.get('protocol', 'ip')}",
-            f"classtype:{rule.get('classtype', 'unknown')}"
-        ]
+        action, protocol, src_addr, src_port, direction, dst_addr, dst_port, options = match.groups()
         
-        # Add flow direction if present
-        if 'flow' in rule.get('options', {}):
-            tags.append(f"flow:{rule['options']['flow']}")
+        # Parse options
+        parsed_options = self._parse_options(options)
+        
+        # Extract key fields
+        sid = self._extract_sid(parsed_options)
+        if not sid:
+            return None
+        
+        msg = self._extract_msg(parsed_options)
+        classtype = parsed_options.get('classtype', 'unknown')
+        priority = int(parsed_options.get('priority', '3'))
+        
+        # Map severity
+        severity = self._map_severity(priority, classtype)
+        
+        # Extract MITRE techniques
+        mitre_techniques = self._extract_mitre_techniques(classtype, msg)
+        
+        # Extract CVEs
+        cves = self._extract_cves(parsed_options)
+        
+        # Extract references
+        references = self._extract_references(parsed_options)
         
         return {
-            'original_id': f"snort:{rule.get('sid', '')}",
-            'title': title,
-            'description': self._build_description(rule),
-            'severity': rule.get('severity', 'medium'),
-            'confidence_score': 0.8,  # Snort rules are generally reliable
-            'tags': tags,
+            'original_id': f"snort:{sid}",
+            'title': msg or f"Snort Rule {sid}",
+            'description': self._build_description(msg, classtype, action),
+            'severity': severity,
+            'confidence_score': 0.85,
+            'tags': self._build_tags(action, protocol, classtype),
             'mitre_techniques': mitre_techniques,
             'false_positives': [],
-            'references': rule.get('references', []),
-            'cve_references': rule.get('cves', []),
+            'references': references,
+            'cve_references': cves,
             'source': 'snort',
             'source_version': '3.0',
             'status': 'active',
             
             'detection_logic': {
                 'format': 'snort',
-                'content': rule.get('raw_rule', ''),
+                'content': rule_line,
                 'parsed': {
-                    'action': rule.get('action'),
-                    'protocol': rule.get('protocol'),
-                    'source_ip': rule.get('source_ip'),
-                    'source_port': rule.get('source_port'),
-                    'destination_ip': rule.get('destination_ip'),
-                    'destination_port': rule.get('destination_port'),
-                    'options': rule.get('options', {})
+                    'action': action,
+                    'protocol': protocol,
+                    'source_address': src_addr,
+                    'source_port': src_port,
+                    'direction': direction,
+                    'destination_address': dst_addr,
+                    'destination_port': dst_port,
+                    'options': parsed_options
                 }
             },
             
             'metadata': {
-                'sid': rule.get('sid', ''),
-                'classtype': rule.get('classtype', ''),
-                'file_path': rule.get('file_path', ''),
-                'content_hash': hashlib.sha256(
-                    rule.get('raw_rule', '').encode()
-                ).hexdigest()[:16],
+                'sid': sid,
+                'classtype': classtype,
+                'priority': priority,
+                'content_hash': hashlib.sha256(rule_line.encode()).hexdigest()[:16],
                 'platforms': ['network'],
                 'data_sources': ['network:traffic']
             }
         }
     
-    def _normalize_downloaded_rule(self, rule: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize rule already processed by downloader"""
-        return {
-            'original_id': f"snort:{rule.get('rule_id', '')}",
-            'title': rule.get('name', 'Snort Rule'),
-            'description': f"Protocol: {rule.get('protocol', 'any')}, "
-                          f"Source: {rule.get('source_ip', 'any')}:{rule.get('source_port', 'any')}, "
-                          f"Dest: {rule.get('destination_ip', 'any')}:{rule.get('destination_port', 'any')}",
-            'severity': 'medium',
-            'confidence_score': 0.7,
-            'tags': [f"action:{rule.get('action', 'alert')}"],
-            'mitre_techniques': [],
-            'false_positives': [],
-            'references': [],
-            'source': 'snort',
-            'source_version': '3.0',
-            'status': 'active',
-            
-            'detection_logic': {
-                'format': 'snort',
-                'content': rule.get('rule_content', '')
-            },
-            
-            'metadata': {
-                'original_id': rule.get('rule_id', ''),
-                'content_hash': hashlib.sha256(
-                    rule.get('rule_content', '').encode()
-                ).hexdigest()[:16],
-                'platforms': ['network'],
-                'data_sources': ['network:traffic']
-            }
-        }
+    def _parse_options(self, options_str: str) -> Dict[str, Any]:
+        """Parse Snort rule options"""
+        
+        options = {}
+        
+        # Extract SID
+        sid_match = self.SID_PATTERN.search(options_str)
+        if sid_match:
+            options['sid'] = sid_match.group(1)
+        
+        # Extract message
+        msg_match = self.MSG_PATTERN.search(options_str)
+        if msg_match:
+            options['msg'] = msg_match.group(1)
+        
+        # Extract classtype
+        classtype_match = self.CLASSTYPE_PATTERN.search(options_str)
+        if classtype_match:
+            options['classtype'] = classtype_match.group(1).strip()
+        
+        # Extract priority
+        priority_match = self.PRIORITY_PATTERN.search(options_str)
+        if priority_match:
+            options['priority'] = priority_match.group(1)
+        
+        # Extract references
+        references = []
+        for ref_match in self.REF_PATTERN.finditer(options_str):
+            references.append(ref_match.group(1).strip())
+        if references:
+            options['references'] = references
+        
+        # Extract flow, content, and other options
+        if 'flow:' in options_str:
+            flow_match = re.search(r'flow:\s*([^;]+)', options_str)
+            if flow_match:
+                options['flow'] = flow_match.group(1).strip()
+        
+        if 'content:' in options_str:
+            content_matches = re.findall(r'content:\s*"([^"]+)"', options_str)
+            if content_matches:
+                options['content'] = content_matches
+        
+        return options
     
-    def _build_description(self, rule: Dict[str, Any]) -> str:
-        """Build descriptive text for rule"""
-        parts = []
-        
-        # Add basic flow info
-        parts.append(
-            f"{rule.get('action', 'Alert')} on {rule.get('protocol', 'any')} traffic"
-        )
-        
-        # Add source/dest info
-        src = f"{rule.get('source_ip', 'any')}:{rule.get('source_port', 'any')}"
-        dst = f"{rule.get('destination_ip', 'any')}:{rule.get('destination_port', 'any')}"
-        parts.append(f"from {src} to {dst}")
-        
-        # Add classtype if present
-        if rule.get('classtype'):
-            parts.append(f"Class: {rule['classtype']}")
-        
-        return ". ".join(parts)
+    def _extract_sid(self, options: Dict) -> Optional[str]:
+        """Extract SID from options"""
+        return options.get('sid')
     
-    def _extract_mitre_techniques(self, references: List[str]) -> List[str]:
-        """Extract MITRE ATT&CK techniques from references"""
+    def _extract_msg(self, options: Dict) -> str:
+        """Extract message from options"""
+        return options.get('msg', '')
+    
+    def _map_severity(self, priority: int, classtype: str) -> str:
+        """Map Snort priority/classtype to severity"""
+        
+        # High severity classtypes
+        high_severity = [
+            'trojan-activity', 'attempted-admin', 'successful-admin',
+            'shellcode-detect', 'system-call-detect'
+        ]
+        
+        # Low severity classtypes
+        low_severity = [
+            'policy-violation', 'protocol-command-decode',
+            'string-detect', 'unknown'
+        ]
+        
+        if classtype in high_severity or priority == 1:
+            return 'critical'
+        elif priority == 2:
+            return 'high'
+        elif classtype in low_severity or priority >= 4:
+            return 'low'
+        else:
+            return 'medium'
+    
+    def _extract_mitre_techniques(self, classtype: str, msg: str) -> List[str]:
+        """Extract potential MITRE indicators for enricher processing"""
+        
+        # Return classtype and message keywords as hints for the enricher
+        # The MITRE enricher will do proper mapping using STIX database
         techniques = []
         
-        for ref in references:
-            # Look for MITRE references
-            if 'attack.mitre.org' in ref:
-                match = re.search(r'T\d{4}(?:\.\d{3})?', ref)
-                if match:
-                    techniques.append(match.group())
+        # Preserve classtype for enricher
+        if classtype:
+            techniques.append(f"classtype:{classtype}")
+        
+        # Extract potential technique keywords from message
+        msg_lower = msg.lower()
+        keywords = [
+            'command injection', 'sql injection', 'buffer overflow',
+            'brute force', 'backdoor', 'phishing', 'privilege escalation',
+            'lateral movement', 'persistence', 'credential', 'exfiltration'
+        ]
+        
+        for keyword in keywords:
+            if keyword in msg_lower:
+                techniques.append(f"keyword:{keyword.replace(' ', '_')}")
         
         return techniques
     
-    def _generate_ruleset_id(self, rules_data: Dict[str, Any]) -> str:
-        """Generate unique ID for this ruleset import"""
-        source = rules_data.get('source', 'snort')
-        timestamp = rules_data.get('downloaded_at', datetime.now(timezone.utc).isoformat())
-        return hashlib.sha256(f"{source}:{timestamp}".encode()).hexdigest()[:16]
+    def _extract_cves(self, options: Dict) -> List[str]:
+        """Extract CVE references from options"""
+        
+        cves = []
+        references = options.get('references', [])
+        
+        for ref in references:
+            cve_matches = self.CVE_PATTERN.findall(ref)
+            cves.extend([cve.upper().replace(',', '-') for cve in cve_matches])
+        
+        return list(set(cves))
+    
+    def _extract_references(self, options: Dict) -> List[str]:
+        """Extract and format references"""
+        
+        references = []
+        raw_refs = options.get('references', [])
+        
+        for ref in raw_refs:
+            if 'url,' in ref:
+                url = ref.split('url,', 1)[1].strip()
+                references.append(url)
+            elif 'cve,' in ref.lower():
+                # CVEs handled separately
+                continue
+            else:
+                references.append(ref)
+        
+        return references
+    
+    def _build_description(self, msg: str, classtype: str, action: str) -> str:
+        """Build rule description"""
+        
+        description = msg or f"Snort rule for {classtype}"
+        
+        if action != 'alert':
+            description += f" (Action: {action})"
+        
+        return description
+    
+    def _build_tags(self, action: str, protocol: str, classtype: str) -> List[str]:
+        """Build rule tags"""
+        
+        tags = [
+            f"action:{action}",
+            f"protocol:{protocol}",
+            f"classtype:{classtype}",
+            "ids:snort"
+        ]
+        
+        return tags
 
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """Lambda entry point for EventBridge events"""
-    start_time = datetime.now(timezone.utc)
+def lambda_handler(event, context):
+    """Lambda handler for Snort rule parsing"""
     
     try:
-        detail = event.get('detail', {})
-        if not detail:
-            detail = event
+        # Parse EventBridge event
+        detail = json.loads(event.get('detail', '{}')) if isinstance(event.get('detail'), str) else event.get('detail', {})
         
-        ruleset_id = detail.get('ruleset_id')
         s3_bucket = detail.get('s3_bucket', STAGING_BUCKET)
         s3_key = detail.get('s3_key')
+        ruleset_id = detail.get('ruleset_id')
         
         if not s3_key:
-            raise ValueError("No S3 key provided")
+            raise ValueError("Missing s3_key in event detail")
         
         logger.info(f"Processing Snort ruleset {ruleset_id} from s3://{s3_bucket}/{s3_key}")
         
-        # Download rules from S3
-        response = s3_client.get_object(Bucket=s3_bucket, Key=s3_key)
-        rules_data = json.loads(response['Body'].read())
+        # Download and parse rules
+        parser = SnortRuleParser()
+        all_rules = []
         
-        # Parse rules
-        parser = SnortParser()
-        parsed_data = parser.parse_ruleset(rules_data)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # Download from S3
+            tar_path = temp_path / 'snort-rules.tar.gz'
+            s3_client.download_file(s3_bucket, s3_key, str(tar_path))
+            
+            # Extract and parse
+            with tarfile.open(tar_path, 'r:gz') as tar:
+                for member in tar.getmembers():
+                    if member.name.endswith('.rules'):
+                        content = tar.extractfile(member).read().decode('utf-8', errors='ignore')
+                        rules = parser.parse_rules(content)
+                        all_rules.extend(rules)
         
-        # Store parsed rules
-        parsed_key = s3_key.replace('rulesets/', 'parsed/').replace('.json', '_parsed.json')
+        # Upload parsed rules to S3
+        parsed_key = s3_key.replace('/rules.tar.gz', '/parsed.json')
+        
+        parsed_data = {
+            'source': 'snort',
+            'ruleset_id': ruleset_id,
+            'parsed_at': datetime.now(timezone.utc).isoformat(),
+            'statistics': parser.stats,
+            'rules': all_rules
+        }
+        
         s3_client.put_object(
             Bucket=s3_bucket,
             Key=parsed_key,
             Body=json.dumps(parsed_data),
-            ContentType='application/json',
-            Metadata={
-                'ruleset_id': parsed_data['ruleset_id'],
-                'source': 'snort',
-                'parser_version': '1.0',
-                'rule_count': str(len(parsed_data['rules']))
-            }
+            ContentType='application/json'
         )
         
         # Publish event for universal processor
-        event_detail = {
-            'ruleset_id': parsed_data['ruleset_id'],
-            'source': 'snort',
-            's3_bucket': s3_bucket,
-            's3_key': parsed_key,
-            'rule_count': len(parsed_data['rules']),
-            'statistics': parsed_data['statistics'],
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
-        
         eventbridge_client.put_events(
             Entries=[{
                 'Source': 'rules.parser.snort',
                 'DetailType': 'com.security.rules.parsed',
-                'Detail': json.dumps(event_detail),
+                'Detail': json.dumps({
+                    'ruleset_id': ruleset_id,
+                    'source': 'snort',
+                    's3_bucket': s3_bucket,
+                    's3_key': parsed_key,
+                    'rule_count': len(all_rules),
+                    'statistics': parser.stats,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }),
                 'EventBusName': EVENT_BUS
             }]
         )
         
-        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-        
-        logger.info(f"Successfully parsed {len(parsed_data['rules'])} rules in {duration:.2f}s")
+        logger.info(f"Successfully parsed {len(all_rules)} Snort rules")
         
         return {
             'statusCode': 200,
             'body': json.dumps({
                 'message': 'Snort rules parsed successfully',
-                'ruleset_id': parsed_data['ruleset_id'],
-                'rules_parsed': len(parsed_data['rules']),
-                'statistics': parsed_data['statistics'],
-                's3_location': f"s3://{s3_bucket}/{parsed_key}",
-                'duration_seconds': duration
+                'ruleset_id': ruleset_id,
+                'rule_count': len(all_rules),
+                'statistics': parser.stats
             })
         }
         
     except Exception as e:
-        logger.error(f"Processing failed: {e}", exc_info=True)
+        logger.error(f"Parsing failed: {e}", exc_info=True)
         
+        # Publish failure event
         eventbridge_client.put_events(
             Entries=[{
                 'Source': 'rules.parser.snort',
-                'DetailType': 'com.security.rules.failed',
+                'DetailType': 'com.security.rules.parse.failed',
                 'Detail': json.dumps({
                     'ruleset_id': detail.get('ruleset_id', 'unknown'),
+                    'source': 'snort',
                     'error': str(e),
-                    'failure_type': 'parse_failed',
                     'timestamp': datetime.now(timezone.utc).isoformat()
                 }),
                 'EventBusName': EVENT_BUS
@@ -465,8 +422,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return {
             'statusCode': 500,
             'body': json.dumps({
-                'error': 'Processing failed',
-                'message': str(e),
-                'timestamp': start_time.isoformat()
+                'error': 'Parsing failed',
+                'message': str(e)
             })
         }

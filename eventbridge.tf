@@ -149,62 +149,150 @@ resource "aws_lambda_permission" "eventbridge_universal_processor" {
   source_arn    = aws_cloudwatch_event_rule.universal_processor_trigger.arn
 }
 
-# Lambda function definitions updates
-resource "aws_lambda_function" "pano_sigma_parser" {
-  function_name = "pano-sigma-parser"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.13"
-  role          = local.lambda_execrole_arn
-  memory_size   = 512
-  timeout       = 120
-  tags          = var.common_tags
 
-  environment {
-    variables = {
-      STAGING_BUCKET = aws_s3_bucket.staging.bucket
-      EVENT_BUS      = aws_cloudwatch_event_bus.rules_processing.name
-    }
-  }
+# Elastic Parser Trigger
+resource "aws_cloudwatch_event_rule" "elastic_parser_trigger" {
+  name           = "trigger-elastic-parser"
+  description    = "Trigger Elastic parser when rules downloaded"
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
 
-  layers = [
-    local.lambda_layers.dependencies
-  ]
+  event_pattern = jsonencode({
+    source      = ["rules.downloader.elastic"]
+    detail-type = ["com.security.rules.downloaded"]
+  })
 
-  filename         = data.archive_file.pano_sigma_parser.output_path
-  source_code_hash = data.archive_file.pano_sigma_parser.output_base64sha256
+  tags = var.common_tags
 }
 
-resource "aws_lambda_function" "pano_universal_processor" {
-  function_name = "pano-universal-processor"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.13"
-  role          = local.lambda_execrole_arn
-  memory_size   = 1024
-  timeout       = 300
-  tags          = var.common_tags
+resource "aws_cloudwatch_event_target" "elastic_parser" {
+  rule           = aws_cloudwatch_event_rule.elastic_parser_trigger.name
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
+  target_id      = "elastic-parser"
+  arn            = aws_lambda_function.pano_elastic_parser.arn
 
-  environment {
-    variables = {
-      DB_HOST       = aws_db_instance.panorama.address
-      DB_NAME       = aws_db_instance.panorama.db_name
-      DB_SECRET_ARN = local.db_secret_arn
-      DB_USER       = aws_db_instance.panorama.username
-      DB_PORT       = 5432
-      EVENT_BUS     = aws_cloudwatch_event_bus.rules_processing.name
-      BATCH_SIZE    = 100
-    }
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 2
   }
+}
 
-  vpc_config {
-    subnet_ids         = local.vpc_config.subnet_prv_ids
-    security_group_ids = local.vpc_config.security_group_ids
+# Snort Parser Trigger
+resource "aws_cloudwatch_event_rule" "snort_parser_trigger" {
+  name           = "trigger-snort-parser"
+  description    = "Trigger Snort parser when rules downloaded"
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
+
+  event_pattern = jsonencode({
+    source      = ["rules.downloader.snort"]
+    detail-type = ["com.security.rules.downloaded"]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "snort_parser" {
+  rule           = aws_cloudwatch_event_rule.snort_parser_trigger.name
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
+  target_id      = "snort-parser"
+  arn            = aws_lambda_function.pano_snort_parser.arn
+
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 2
   }
+}
 
-  layers = [
-    local.lambda_layers.datamodel,
-    local.lambda_layers.dependencies
-  ]
+# MITRE Enricher Trigger
+resource "aws_cloudwatch_event_rule" "mitre_enricher_trigger" {
+  name           = "trigger-mitre-enricher"
+  description    = "Trigger MITRE enricher when rules need enrichment"
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
 
-  filename         = data.archive_file.pano_universal_processor.output_path
-  source_code_hash = data.archive_file.pano_universal_processor.output_base64sha256
+  event_pattern = jsonencode({
+    source      = ["rules.processor"]
+    detail-type = ["com.security.enrichment.mitre"]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "mitre_enricher" {
+  rule           = aws_cloudwatch_event_rule.mitre_enricher_trigger.name
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
+  target_id      = "mitre-enricher"
+  arn            = aws_lambda_function.pano_mitre_enricher.arn
+
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 2
+  }
+}
+
+# CVE Enricher Trigger
+resource "aws_cloudwatch_event_rule" "cve_enricher_trigger" {
+  name           = "trigger-cve-enricher"
+  description    = "Trigger CVE enricher when rules need enrichment"
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
+
+  event_pattern = jsonencode({
+    source      = ["rules.processor"]
+    detail-type = ["com.security.enrichment.cve"]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "cve_enricher" {
+  rule           = aws_cloudwatch_event_rule.cve_enricher_trigger.name
+  event_bus_name = aws_cloudwatch_event_bus.rules_processing.name
+  target_id      = "cve-enricher"
+  arn            = aws_lambda_function.pano_cve_enricher.arn
+
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 2
+  }
+}
+
+# Download Schedules
+resource "aws_cloudwatch_event_rule" "elastic_download_schedule" {
+  name                = "elastic-download-schedule"
+  description         = "Schedule for automatic Elastic rule downloads"
+  schedule_expression = "rate(24 hours)"
+  state               = var.enable_auto_download ? "ENABLED" : "DISABLED"
+  tags                = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "elastic_downloader_scheduled" {
+  rule      = aws_cloudwatch_event_rule.elastic_download_schedule.name
+  target_id = "elastic-downloader"
+  arn       = aws_lambda_function.pano_elastic_downloader.arn
+}
+
+resource "aws_cloudwatch_event_rule" "snort_download_schedule" {
+  name                = "snort-download-schedule"
+  description         = "Schedule for automatic Snort rule downloads"
+  schedule_expression = "rate(12 hours)"
+  state               = var.enable_auto_download ? "ENABLED" : "DISABLED"
+  tags                = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "snort_downloader_scheduled" {
+  rule      = aws_cloudwatch_event_rule.snort_download_schedule.name
+  target_id = "snort-downloader"
+  arn       = aws_lambda_function.pano_snort_downloader.arn
+}
+
+resource "aws_cloudwatch_event_rule" "stix_update_schedule" {
+  name                = "stix-update-schedule"
+  description         = "Schedule for STIX data updates"
+  schedule_expression = "rate(7 days)"
+  state               = "ENABLED"
+  tags                = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "stix_processor_scheduled" {
+  rule      = aws_cloudwatch_event_rule.stix_update_schedule.name
+  target_id = "stix-processor"
+  arn       = aws_lambda_function.pano_stix_processor.arn
 }
