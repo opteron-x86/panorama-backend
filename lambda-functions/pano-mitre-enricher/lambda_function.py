@@ -1,11 +1,14 @@
 """
 Panorama MITRE Enricher Lambda
 """
+import os
 import json
 import logging
 import re
 from typing import Set, List, Dict, Any, Tuple, Optional
 from datetime import datetime
+
+from onnx_helper import ONNXEnricher
 
 from panorama_datamodel import db_session
 from panorama_datamodel.models import DetectionRule, MitreTechnique, RuleMitreMapping
@@ -31,7 +34,9 @@ class MitreEnricher:
         self.confidence_scores = []
         self._technique_cache = None
         self._technique_name_lookup = None
-        
+        self.onnx_enricher = None
+        self.use_ml = os.environ.get('USE_ML', 'true').lower() == 'true'
+
     def enrich_rules(self, rule_ids: List[int] = None) -> Dict[str, Any]:
         logger.info(f"Starting MITRE enrichment for {len(rule_ids) if rule_ids else 'all'} rules")
         
@@ -153,8 +158,33 @@ class MitreEnricher:
                 logger.error(f"Failed to process rule {rule.id}: {e}")
     
     def _enrich_single_rule(self, rule: DetectionRule, valid_techniques: Dict[str, MitreTechnique], session):
-        """Enrich a single rule with MITRE technique mappings."""
+        # Try regex extraction first for explicit tags
         extracted_techniques = self._extract_techniques_from_rule(rule)
+        
+        # Use ML for additional discovery
+        if self.use_ml:
+            if not self.onnx_enricher:
+                try:
+                    self.onnx_enricher = ONNXEnricher()
+                except Exception as e:
+                    logger.error(f"Failed to initialize ONNX: {e}")
+                    self.use_ml = False
+            
+            if self.onnx_enricher:
+                try:
+                    rule_text = f"{rule.name} {rule.description} {str(rule.rule_content)[:500]}"
+                    ml_techniques = self.onnx_enricher.find_techniques(rule_text)
+                    
+                    existing_ids = {t['id'] for t in extracted_techniques}
+                    for tech_id, score in ml_techniques:
+                        if tech_id not in existing_ids and tech_id in valid_techniques:
+                            extracted_techniques.append({
+                                'id': tech_id,
+                                'confidence': score,
+                                'source': 'onnx_ml'
+                            })
+                except Exception as e:
+                    logger.error(f"ML enrichment failed for rule {rule.id}: {e}")
         
         deprecated_mappings = self._check_deprecated_mappings(rule, session)
         
@@ -162,7 +192,6 @@ class MitreEnricher:
             return
         
         self.techniques_found += len(extracted_techniques)
-        
         deprecation_warnings = []
         
         for technique_info in extracted_techniques:
@@ -175,7 +204,6 @@ class MitreEnricher:
                 mapping_created = self._create_or_update_mapping(
                     rule, technique, confidence, source, session
                 )
-                
                 if mapping_created:
                     self.confidence_scores.append(confidence)
             else:
@@ -187,8 +215,6 @@ class MitreEnricher:
                 if deprecated_tech:
                     deprecation_warnings.append(technique_id)
                     logger.warning(f"Skipped deprecated technique {technique_id} for rule {rule.id}")
-                else:
-                    logger.debug(f"MITRE technique {technique_id} not found in database (rule {rule.id})")
         
         if deprecated_mappings or deprecation_warnings:
             self._add_deprecation_metadata(rule, deprecated_mappings, deprecation_warnings, session)

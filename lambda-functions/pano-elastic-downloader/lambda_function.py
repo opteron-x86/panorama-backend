@@ -119,7 +119,7 @@ class ElasticDownloader:
         rules_dir = temp_path / 'rules'
         rules_dir.mkdir(exist_ok=True)
         
-        for file_info in rule_files[:500]:  # Limit to avoid timeout
+        for file_info in rule_files[:2000]:  # Limit to avoid timeout
             try:
                 # Download file content
                 req = urllib.request.Request(file_info['download_url'])

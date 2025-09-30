@@ -382,43 +382,105 @@ class UniversalRuleProcessor:
     
     def _trigger_enrichments(self):
         """Trigger enrichment lambdas if needed"""
+        
+        # Constants for Lambda limits
+        MAX_PAYLOAD_SIZE = 250000  # 250KB to stay safely under 256KB limit
+        MAX_BATCH_SIZE = 100  # Initial batch size
+        
         # MITRE enrichment
         if self.enrichment_queues['mitre']:
-            try:
-                payload = {
-                    'action': 'enrich_rules',
-                    'source': 'universal_processor',
-                    'mappings': self.enrichment_queues['mitre'][:500]  # Limit batch size
-                }
+            mitre_queue = self.enrichment_queues['mitre']
+            total_rules = len(mitre_queue)
+            sent_rules = 0
+            
+            while sent_rules < total_rules:
+                batch_size = MAX_BATCH_SIZE
                 
-                lambda_client.invoke(
-                    FunctionName='pano-mitre-enricher',
-                    InvocationType='Event',
-                    Payload=json.dumps(payload)
-                )
+                # Dynamically adjust batch size based on payload size
+                while batch_size > 0:
+                    batch = mitre_queue[sent_rules:sent_rules + batch_size]
+                    payload = {
+                        'action': 'enrich_rules',
+                        'source': 'universal_processor',
+                        'mappings': batch
+                    }
+                    
+                    # Check payload size
+                    payload_str = json.dumps(payload)
+                    if len(payload_str.encode('utf-8')) < MAX_PAYLOAD_SIZE:
+                        break
+                    
+                    # Reduce batch size if too large
+                    batch_size = batch_size // 2
+                    if batch_size < 1:
+                        # Single item too large, skip it
+                        logger.error(f"Single MITRE enrichment item too large to process")
+                        batch_size = 1
+                        batch = []
+                        break
                 
-                logger.info(f"Queued {len(self.enrichment_queues['mitre'])} rules for MITRE enrichment")
-            except Exception as e:
-                logger.error(f"Failed to trigger MITRE enrichment: {e}")
+                if batch:
+                    try:
+                        lambda_client.invoke(
+                            FunctionName='pano-mitre-enricher',
+                            InvocationType='Event',
+                            Payload=payload_str
+                        )
+                        
+                        logger.info(f"Queued {len(batch)} rules for MITRE enrichment (batch {sent_rules//MAX_BATCH_SIZE + 1})")
+                    except Exception as e:
+                        logger.error(f"Failed to trigger MITRE enrichment batch: {e}")
+                
+                sent_rules += batch_size if batch else 1
+            
+            logger.info(f"Total: Queued {total_rules} rules for MITRE enrichment")
         
         # CVE enrichment
         if self.enrichment_queues['cve']:
-            try:
-                payload = {
-                    'action': 'enrich_cve_references',
-                    'source': 'universal_processor',
-                    'mappings': self.enrichment_queues['cve'][:500]
-                }
+            cve_queue = self.enrichment_queues['cve']
+            total_cves = len(cve_queue)
+            sent_cves = 0
+            
+            while sent_cves < total_cves:
+                batch_size = MAX_BATCH_SIZE
                 
-                lambda_client.invoke(
-                    FunctionName='pano-cve-enricher',
-                    InvocationType='Event',
-                    Payload=json.dumps(payload)
-                )
+                # Dynamically adjust batch size
+                while batch_size > 0:
+                    batch = cve_queue[sent_cves:sent_cves + batch_size]
+                    payload = {
+                        'action': 'enrich_cve_references',
+                        'source': 'universal_processor',
+                        'mappings': batch
+                    }
+                    
+                    # Check payload size
+                    payload_str = json.dumps(payload)
+                    if len(payload_str.encode('utf-8')) < MAX_PAYLOAD_SIZE:
+                        break
+                    
+                    # Reduce batch size if too large
+                    batch_size = batch_size // 2
+                    if batch_size < 1:
+                        logger.error(f"Single CVE enrichment item too large to process")
+                        batch_size = 1
+                        batch = []
+                        break
                 
-                logger.info(f"Queued {len(self.enrichment_queues['cve'])} rules for CVE enrichment")
-            except Exception as e:
-                logger.error(f"Failed to trigger CVE enrichment: {e}")
+                if batch:
+                    try:
+                        lambda_client.invoke(
+                            FunctionName='pano-cve-enricher',
+                            InvocationType='Event',
+                            Payload=payload_str
+                        )
+                        
+                        logger.info(f"Queued {len(batch)} rules for CVE enrichment (batch {sent_cves//MAX_BATCH_SIZE + 1})")
+                    except Exception as e:
+                        logger.error(f"Failed to trigger CVE enrichment batch: {e}")
+                
+                sent_cves += batch_size if batch else 1
+            
+            logger.info(f"Total: Queued {total_cves} rules for CVE enrichment")
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

@@ -1,0 +1,73 @@
+{
+    "FunctionName": "pano-mitre-enricher",
+    "FunctionArn": "arn:aws:lambda:us-east-2:538269499906:function:pano-mitre-enricher",
+    "Runtime": "python3.13",
+    "Role": "arn:aws:iam::538269499906:role/panorama-lambda-exec-role",
+    "Handler": "lambda_function.lambda_handler",
+    "CodeSize": 5231,
+    "Description": "",
+    "Timeout": 120,
+    "MemorySize": 512,
+    "LastModified": "2025-09-30T02:32:08.000+0000",
+    "CodeSha256": "cY3UyCtsIDfHS9nH+WouF4jzpunmE1P9yh4NumS85+I=",
+    "Version": "$LATEST",
+    "VpcConfig": {
+        "SubnetIds": [
+            "subnet-0026c39860281ced1",
+            "subnet-0dcff8fbea9ddd947"
+        ],
+        "SecurityGroupIds": [
+            "sg-09cf54948f08637f0"
+        ],
+        "VpcId": "vpc-06f331697458252ad",
+        "Ipv6AllowedForDualStack": false
+    },
+    "Environment": {
+        "Variables": {
+            "EVENT_BUS": "panorama-rules-processing",
+            "DB_PORT": "5432",
+            "DB_USER": "pgadmin",
+            "DB_NAME": "PanoDB",
+            "DB_HOST": "panorama-db-1.c7ygueakm651.us-east-2.rds.amazonaws.com",
+            "DB_SECRET_ARN": "arn:aws:secretsmanager:us-east-2:538269499906:secret:rds!db-99db52c2-1139-4a27-a78c-467ee9a6da0c-UDYSKg"
+        }
+    },
+    "TracingConfig": {
+        "Mode": "PassThrough"
+    },
+    "RevisionId": "921f0d71-2f94-4b34-967a-6b4ac5124064",
+    "Layers": [
+        {
+            "Arn": "arn:aws:lambda:us-east-2:538269499906:layer:panorama_dependencies:1",
+            "CodeSize": 21494036
+        },
+        {
+            "Arn": "arn:aws:lambda:us-east-2:538269499906:layer:panorama_datamodel:4",
+            "CodeSize": 24554
+        },
+        {
+            "Arn": "arn:aws:lambda:us-east-2:538269499906:layer:panorama-numpy-py313:1",
+            "CodeSize": 20469972
+        }
+    ],
+    "State": "Active",
+    "LastUpdateStatus": "Successful",
+    "PackageType": "Zip",
+    "Architectures": [
+        "x86_64"
+    ],
+    "EphemeralStorage": {
+        "Size": 512
+    },
+    "SnapStart": {
+        "ApplyOn": "None",
+        "OptimizationStatus": "Off"
+    },
+    "RuntimeVersionConfig": {
+        "RuntimeVersionArn": "arn:aws:lambda:us-east-2::runtime:6e38c6392184a42a11f69b8b07e902e6615b10d7a884c3e3cbd4d0b8a5e42c07"
+    },
+    "LoggingConfig": {
+        "LogFormat": "Text",
+        "LogGroup": "/aws/lambda/pano-mitre-enricher"
+    }
+}

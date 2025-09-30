@@ -284,7 +284,9 @@ resource "aws_lambda_function" "pano_mitre_enricher" {
 
   layers = [
     local.lambda_layers.dependencies,
-    local.lambda_layers.datamodel
+    local.lambda_layers.datamodel,
+    local.lambda_layers.numpy,
+    local.lambda_layers.onnx
   ]
 
   filename         = data.archive_file.pano_mitre_enricher.output_path
@@ -298,7 +300,7 @@ resource "aws_lambda_function" "pano_cve_enricher" {
   runtime       = "python3.13"
   role          = local.lambda_execrole_arn
   memory_size   = 512
-  timeout       = 120
+  timeout       = 600
   tags          = var.common_tags
 
   environment {
