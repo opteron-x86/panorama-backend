@@ -10,3 +10,4 @@ builds/
 *.7z
 locals.tf
 lambda-layers/
+Dockerfile
