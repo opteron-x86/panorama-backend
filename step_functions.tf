@@ -13,7 +13,7 @@ resource "aws_sfn_state_machine" "mitre_enrichment" {
       }
       ProcessInParallel = {
         Type           = "Map"
-        MaxConcurrency = 10  # Run 10 workers at once
+        MaxConcurrency = 3  # Run 10 workers at once
         ItemsPath      = "$.chunks"
         Iterator = {
           StartAt = "ProcessChunk"

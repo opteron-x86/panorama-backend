@@ -201,6 +201,7 @@ resource "aws_cloudwatch_event_target" "snort_parser" {
   }
 }
 
+/*
 # MITRE Enricher Trigger
 resource "aws_cloudwatch_event_rule" "mitre_enricher_trigger" {
   name           = "trigger-mitre-enricher"
@@ -226,6 +227,7 @@ resource "aws_cloudwatch_event_target" "mitre_enricher" {
     maximum_retry_attempts       = 2
   }
 }
+*/
 
 # CVE Enricher Trigger
 resource "aws_cloudwatch_event_rule" "cve_enricher_trigger" {
@@ -257,7 +259,7 @@ resource "aws_cloudwatch_event_target" "cve_enricher" {
 resource "aws_cloudwatch_event_rule" "elastic_download_schedule" {
   name                = "elastic-download-schedule"
   description         = "Schedule for automatic Elastic rule downloads"
-  schedule_expression = "rate(24 hours)"
+  schedule_expression = "rate(96 hours)"
   state               = var.enable_auto_download ? "ENABLED" : "DISABLED"
   tags                = var.common_tags
 }
@@ -271,7 +273,7 @@ resource "aws_cloudwatch_event_target" "elastic_downloader_scheduled" {
 resource "aws_cloudwatch_event_rule" "snort_download_schedule" {
   name                = "snort-download-schedule"
   description         = "Schedule for automatic Snort rule downloads"
-  schedule_expression = "rate(12 hours)"
+  schedule_expression = "rate(96 hours)"
   state               = var.enable_auto_download ? "ENABLED" : "DISABLED"
   tags                = var.common_tags
 }
@@ -285,7 +287,7 @@ resource "aws_cloudwatch_event_target" "snort_downloader_scheduled" {
 resource "aws_cloudwatch_event_rule" "stix_update_schedule" {
   name                = "stix-update-schedule"
   description         = "Schedule for STIX data updates"
-  schedule_expression = "rate(7 days)"
+  schedule_expression = "rate(14 days)"
   state               = "ENABLED"
   tags                = var.common_tags
 }

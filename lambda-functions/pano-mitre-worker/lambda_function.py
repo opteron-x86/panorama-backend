@@ -3,13 +3,37 @@ import os
 import re
 import json
 import logging
-from typing import Set, Optional
+from typing import Set, Dict, Optional, Tuple
 import numpy as np
 from panorama_datamodel import db_session
 from panorama_datamodel.models import DetectionRule, MitreTechnique, RuleMitreMapping
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+import onnxruntime as ort
+from transformers import AutoTokenizer
+
+MODEL_PATH = '/opt/ml/model.onnx'
+EMBEDDINGS_PATH = '/opt/ml/technique_embeddings.json'
+
+ONNX_SESSION = None
+TOKENIZER = None
+TECHNIQUE_EMBEDDINGS = None
+
+def init_ml():
+    global ONNX_SESSION, TOKENIZER, TECHNIQUE_EMBEDDINGS
+    
+    if ONNX_SESSION is None:
+        ONNX_SESSION = ort.InferenceSession(MODEL_PATH)
+        TOKENIZER = AutoTokenizer.from_pretrained(
+            'sentence-transformers/all-MiniLM-L6-v2',
+            cache_dir='/tmp'
+        )
+        with open(EMBEDDINGS_PATH) as f:
+            data = json.load(f)
+        TECHNIQUE_EMBEDDINGS = {k: np.array(v) for k, v in data.items()}
+        logger.info("ML models initialized")
 
 TECHNIQUE_PATTERNS = [
     re.compile(r'\bT\d{4}(?:\.\d{3})?\b', re.IGNORECASE),
@@ -20,9 +44,7 @@ def normalize_technique_id(technique_id: str) -> Optional[str]:
     if not technique_id:
         return None
     
-    technique_id = technique_id.upper().strip()
-    technique_id = technique_id.replace('ATTACK.', '')
-    
+    technique_id = technique_id.upper().strip().replace('ATTACK.', '')
     if not technique_id.startswith('T'):
         technique_id = 'T' + technique_id
     
@@ -33,32 +55,14 @@ def normalize_technique_id(technique_id: str) -> Optional[str]:
 def extract_explicit_techniques(rule: DetectionRule) -> Set[str]:
     techniques = set()
     
-    # Check tags
+    search_text = rule.name or ""
+    if rule.description:
+        search_text += f" {rule.description}"
     if rule.tags:
-        for tag in rule.tags:
-            if 'attack.t' in tag.lower():
-                tech_id = tag.split('.')[-1]
-                normalized = normalize_technique_id(tech_id)
-                if normalized:
-                    techniques.add(normalized)
+        search_text += f" {' '.join(rule.tags)}"
+    if rule.rule_content:
+        search_text += f" {rule.rule_content[:1000]}"
     
-    # Check metadata
-    if rule.rule_metadata and isinstance(rule.rule_metadata, dict):
-        for field in ['mitre_techniques', 'techniques', 'mitre_attack']:
-            if field in rule.rule_metadata:
-                values = rule.rule_metadata[field]
-                if isinstance(values, list):
-                    for tech in values:
-                        normalized = normalize_technique_id(str(tech))
-                        if normalized:
-                            techniques.add(normalized)
-                elif isinstance(values, str):
-                    normalized = normalize_technique_id(values)
-                    if normalized:
-                        techniques.add(normalized)
-    
-    # Scan content
-    search_text = f"{rule.name} {rule.description or ''} {rule.rule_content[:500] if rule.rule_content else ''}"
     for pattern in TECHNIQUE_PATTERNS:
         matches = pattern.findall(search_text)
         for match in matches:
@@ -66,84 +70,58 @@ def extract_explicit_techniques(rule: DetectionRule) -> Set[str]:
             if normalized:
                 techniques.add(normalized)
     
+    if rule.rule_metadata and isinstance(rule.rule_metadata, dict):
+        for key, value in rule.rule_metadata.items():
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str) and re.match(r'T\d{4}', item):
+                        normalized = normalize_technique_id(item)
+                        if normalized:
+                            techniques.add(normalized)
+            elif isinstance(value, str) and re.match(r'T\d{4}', value):
+                normalized = normalize_technique_id(value)
+                if normalized:
+                    techniques.add(normalized)
+    
     return techniques
 
-def compute_text_embedding(text: str) -> np.ndarray:
-    import boto3
-    import onnxruntime as ort
-    from transformers import AutoTokenizer
-    
-    model_path = '/tmp/model.onnx'
-    if not os.path.exists(model_path):
-        s3 = boto3.client('s3')
-        s3.download_file(
-            'panorama-ml-models-538269499906',
-            'onnx/model_int8.onnx',
-            model_path
-        )
-    
-    tokenizer = AutoTokenizer.from_pretrained(
-        'sentence-transformers/all-MiniLM-L6-v2',
-        cache_dir='/tmp'
-    )
-    
-    session = ort.InferenceSession(model_path)
-    inputs = tokenizer(text, padding=True, truncation=True, max_length=128, return_tensors='np')
-    outputs = session.run(None, {
-        'input_ids': inputs['input_ids'],
-        'attention_mask': inputs['attention_mask']
-    })
-    
-    embeddings = outputs[0][0]
-    mask = inputs['attention_mask'][0]
-    mask_expanded = np.expand_dims(mask, -1)
-    sum_embeddings = np.sum(embeddings * mask_expanded, axis=0)
-    sum_mask = np.clip(mask_expanded.sum(axis=0), a_min=1e-9, a_max=None)
-    return sum_embeddings / sum_mask
-
-def load_technique_embeddings() -> dict:
-    import boto3
-    
-    cache_path = '/tmp/technique_embeddings.json'
-    if not os.path.exists(cache_path):
-        s3 = boto3.client('s3')
-        s3.download_file(
-            'panorama-ml-models-538269499906',
-            'onnx/technique_embeddings.json',
-            cache_path
-        )
-    
-    with open(cache_path) as f:
-        data = json.load(f)
-    return {k: np.array(v) for k, v in data.items()}
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    a_norm = a / np.linalg.norm(a)
-    b_norm = b / np.linalg.norm(b)
-    return float(np.dot(a_norm, b_norm))
-
-def find_similar_techniques(text: str, min_similarity: float = 0.70) -> Set[str]:
+def compute_text_embedding(text: str) -> Optional[np.ndarray]:
     try:
-        if not os.environ.get('USE_ML', 'false').lower() == 'true':
-            return set()
-            
-        embedding = compute_text_embedding(text)
-        technique_embeddings = load_technique_embeddings()
+        init_ml()
+        inputs = TOKENIZER(text, padding=True, truncation=True, max_length=128, return_tensors='np')
+        outputs = ONNX_SESSION.run(None, {
+            'input_ids': inputs['input_ids'],
+            'attention_mask': inputs['attention_mask']
+        })
         
-        # Calculate similarities for all techniques
-        similarities = []
-        for tech_id, tech_embedding in technique_embeddings.items():
-            similarity = cosine_similarity(embedding, tech_embedding)
-            if similarity > min_similarity:
-                similarities.append((tech_id, similarity))
-        
-        # Sort and return top 3
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        return {tech_id for tech_id, _ in similarities[:3]}
-        
+        embeddings = outputs[0][0]
+        mask = inputs['attention_mask'][0]
+        mask_expanded = np.expand_dims(mask, -1)
+        sum_embeddings = np.sum(embeddings * mask_expanded, axis=0)
+        sum_mask = np.clip(mask_expanded.sum(axis=0), a_min=1e-9, a_max=None)
+        return sum_embeddings / sum_mask
     except Exception as e:
-        logger.debug(f"ML not available: {e}")
-        return set()
+        logger.error(f"Embedding computation failed: {e}")
+        return None
+
+def find_similar_techniques(text: str, threshold: float = 0.65) -> Dict[str, float]:
+    """Returns dict of technique_id -> similarity_score"""
+    init_ml()
+    embedding = compute_text_embedding(text)
+    if embedding is None or TECHNIQUE_EMBEDDINGS is None:
+        return {}
+    
+    embedding_norm = embedding / np.linalg.norm(embedding)
+    
+    similarities = []
+    for tech_id, tech_embedding in TECHNIQUE_EMBEDDINGS.items():
+        tech_norm = tech_embedding / np.linalg.norm(tech_embedding)
+        similarity = float(np.dot(embedding_norm, tech_norm))
+        if similarity > threshold:
+            similarities.append((tech_id, similarity))
+    
+    similarities.sort(key=lambda x: x[1], reverse=True)
+    return {tech_id: score for tech_id, score in similarities[:5]}
 
 def lambda_handler(event, context):
     chunk_id = event['chunk_id']
@@ -151,69 +129,86 @@ def lambda_handler(event, context):
     
     logger.info(f"Processing chunk {chunk_id} with {len(rule_ids)} rules")
     
+    use_ml = os.environ.get('USE_ML', 'false').lower() == 'true'
+    ml_threshold = float(os.environ.get('ML_THRESHOLD', '0.65'))
+    
     with db_session() as session:
-        # Load valid techniques once
         techniques = session.query(MitreTechnique).filter(
             MitreTechnique.is_deprecated == False
         ).all()
         valid_techniques = {t.technique_id: t for t in techniques}
         
-        # Query rules for this chunk
         rules = session.query(DetectionRule).filter(
             DetectionRule.id.in_(rule_ids)
         ).all()
         
         mappings_created = 0
-        mappings_skipped = 0
+        rules_with_explicit = 0
+        rules_with_ml = 0
+        rules_without_techniques = 0
         
         for rule in rules:
-            # Extract explicit techniques first
-            found_techniques = extract_explicit_techniques(rule)
+            # Track technique sources
+            explicit_techniques = extract_explicit_techniques(rule)
+            ml_techniques = {}  # technique_id -> confidence score
             
-            # Use ML if we found few explicit techniques
-            if len(found_techniques) < 2 and os.environ.get('USE_ML', 'false').lower() == 'true':
-                # Build focused text for ML analysis
-                text_parts = [rule.name]
-                if rule.description:
-                    text_parts.append(rule.description[:200])
+            if explicit_techniques:
+                rules_with_explicit += 1
+            elif use_ml:
+                rule_text = f"{rule.name} {rule.description or ''}"
                 if rule.tags:
-                    # Include attack-related tags for context
-                    attack_tags = [t for t in rule.tags if 'attack' in t.lower()]
-                    text_parts.extend(attack_tags)
+                    rule_text += f" {' '.join(rule.tags[:10])}"
                 
-                rule_text = ' '.join(text_parts)
-                ml_techniques = find_similar_techniques(rule_text)
-                found_techniques.update(ml_techniques)
+                ml_techniques = find_similar_techniques(rule_text, ml_threshold)
+                if ml_techniques:
+                    rules_with_ml += 1
             
-            # Create mappings for found techniques
-            for technique_id in found_techniques:
+            # Combine all techniques
+            all_techniques = explicit_techniques.union(ml_techniques.keys())
+            
+            if not all_techniques:
+                rules_without_techniques += 1
+                continue
+            
+            # Create mappings with proper metadata
+            for technique_id in all_techniques:
                 if technique_id in valid_techniques:
                     technique = valid_techniques[technique_id]
                     
-                    # Check for existing mapping
                     existing = session.query(RuleMitreMapping).filter_by(
                         rule_id=rule.id,
                         technique_id=technique.id
                     ).first()
                     
                     if not existing:
+                        # Determine source and confidence
+                        if technique_id in explicit_techniques:
+                            enrichment_method = 'regex'
+                            ml_confidence = None
+                        else:
+                            enrichment_method = 'ml'
+                            ml_confidence = ml_techniques.get(technique_id, 0.65)
+                        
                         mapping = RuleMitreMapping(
                             rule_id=rule.id,
                             technique_id=technique.id,
-                            mapping_confidence=1.0,  # Default for backward compatibility
-                            mapping_source='enricher'  # Default for backward compatibility
+                            source='ml' if technique_id in ml_techniques else 'regex',
+                            confidence=ml_techniques.get(technique_id) if technique_id in ml_techniques else None
                         )
                         session.add(mapping)
                         mappings_created += 1
-                    else:
-                        mappings_skipped += 1
         
         session.commit()
-        logger.info(f"Chunk {chunk_id}: Created {mappings_created} mappings, skipped {mappings_skipped} existing")
+        
+        logger.info(f"Chunk {chunk_id}: {mappings_created} mappings created, "
+                   f"{rules_with_explicit} explicit, {rules_with_ml} ML, "
+                   f"{rules_without_techniques} no techniques")
     
     return {
         'chunk_id': chunk_id,
         'rules_processed': len(rules),
         'mappings_created': mappings_created,
-        'mappings_skipped': mappings_skipped
+        'rules_with_explicit': rules_with_explicit,
+        'rules_with_ml': rules_with_ml,
+        'rules_without_techniques': rules_without_techniques
     }

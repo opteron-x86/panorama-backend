@@ -11,3 +11,5 @@ builds/
 locals.tf
 lambda-layers/
 Dockerfile
+*.onnx
+*.sh

@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir \
     pydantic \
     boto3
 
-COPY lambda_function.py ${LAMBDA_TASK_ROOT}/
-COPY panorama_datamodel/ ${LAMBDA_TASK_ROOT}/panorama_datamodel/
+COPY lambda_function.py .
+COPY panorama_datamodel/ ./panorama_datamodel/
 
-CMD ["lambda_function.handler"]
+CMD ["lambda_function.lambda_handler"]

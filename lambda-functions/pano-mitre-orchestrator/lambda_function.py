@@ -8,29 +8,23 @@ from panorama_datamodel import db_session
 from panorama_datamodel.models import DetectionRule
 
 def lambda_handler(event, context):
-    """Create work chunks for parallel processing"""
-    
-    chunk_size = event.get('chunk_size', 100) 
+    chunk_size = event.get('chunk_size', 100)
     
     with db_session() as session:
-        query = session.query(DetectionRule.id)
-        
-        if rule_ids := event.get('rule_ids'):
-            query = query.filter(DetectionRule.id.in_(rule_ids))
-        
-        all_rule_ids = [r[0] for r in query.all()]
-
+        # Only unmapped rules
+        mapped_rule_ids = session.query(RuleMitreMapping.rule_id).distinct().subquery()
+        unmapped_rules = session.query(DetectionRule.id).filter(
+            ~DetectionRule.id.in_(mapped_rule_ids)
+        ).all()
+        rule_ids = [r[0] for r in unmapped_rules]
+    
+    logger.info(f"Found {len(rule_ids)} unmapped rules")
+    
     chunks = []
-    for i in range(0, len(all_rule_ids), chunk_size):
+    for i in range(0, len(rule_ids), chunk_size):
         chunks.append({
             'chunk_id': i // chunk_size,
-            'rule_ids': all_rule_ids[i:i + chunk_size],
-            'total_chunks': math.ceil(len(all_rule_ids) / chunk_size)
+            'rule_ids': rule_ids[i:i + chunk_size]
         })
     
-    return {
-        'statusCode': 200,
-        'chunks': chunks,
-        'total_rules': len(all_rule_ids),
-        'chunk_size': chunk_size
-    }
+    return {'chunks': chunks, 'total': len(rule_ids)}

@@ -1,0 +1,9 @@
+# lambda-functions/pano-mitre-worker/requirements.txt
+datetime
+onnxruntime
+numpy
+transformers
+psycopg2-binary
+sqlalchemy
+boto3
+pydantic

@@ -43,11 +43,13 @@ data "archive_file" "pano_snort_downloader" {
   output_path = "${path.module}/builds/pano-snort-downloader.zip"
 }
 
+/*
 data "archive_file" "pano_mitre_enricher" {
   type        = "zip"
   source_dir  = "${path.module}/lambda-functions/pano-mitre-enricher"
   output_path = "${path.module}/builds/pano-mitre-enricher.zip"
 }
+*/
 
 data "archive_file" "pano_cve_enricher" {
   type        = "zip"
@@ -73,11 +75,13 @@ data "archive_file" "pano_mitre_orchestrator" {
   output_path = "${path.module}/builds/pano-mitre-orchestrator.zip"
 }
 
+/*
 data "archive_file" "pano_mitre_worker" {
   type        = "zip"
   source_dir = "${path.module}/lambda-functions/pano-mitre-worker"
   output_path = "${path.module}/builds/pano-mitre-worker.zip"
 }
+*/
 
 # Universal Processor
 resource "aws_lambda_function" "pano_universal_processor" {
@@ -268,7 +272,7 @@ resource "aws_lambda_function" "pano_snort_parser" {
   source_code_hash = data.archive_file.pano_snort_parser.output_base64sha256
 }
 
-# MITRE Enricher
+/* MITRE Enricher
 resource "aws_lambda_function" "pano_mitre_enricher" {
   function_name = "pano-mitre-enricher"
   handler       = "lambda_function.lambda_handler"
@@ -304,6 +308,7 @@ resource "aws_lambda_function" "pano_mitre_enricher" {
   filename         = data.archive_file.pano_mitre_enricher.output_path
   source_code_hash = data.archive_file.pano_mitre_enricher.output_base64sha256
 }
+*/
 
 # CVE Enricher
 resource "aws_lambda_function" "pano_cve_enricher" {
@@ -419,35 +424,45 @@ resource "aws_lambda_function" "pano_stix_processor" {
 }
 
 # Worker Lambda - processes 100 rules at a time
+
+# ECR Repository
+resource "aws_ecr_repository" "mitre_worker" {
+  name = "panorama-mitre-worker"
+  image_tag_mutability = "MUTABLE"
+}
+
+# Container-based Lambda
 resource "aws_lambda_function" "pano_mitre_worker" {
   function_name = "pano-mitre-worker"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.13"
   role          = local.lambda_execrole_arn
-  memory_size   = 512
-  timeout       = 300  # 5 minutes per chunk
+  memory_size   = 2048
+  timeout       = 300
   
-  vpc_config {
-    subnet_ids         = local.vpc_config.subnet_prv_ids
-    security_group_ids = local.vpc_config.security_group_ids
-  }
+  # Specify container package
+  package_type = "Image"
+  image_uri    = "${aws_ecr_repository.mitre_worker.repository_url}:latest"
   
   environment {
     variables = {
       DB_HOST       = aws_db_instance.panorama.address
       DB_NAME       = aws_db_instance.panorama.db_name
       DB_SECRET_ARN = local.db_secret_arn
+      DB_USER       = aws_db_instance.panorama.username
+      DB_PORT       = 5432
+      USE_ML        = "true"
+      ML_THRESHOLD  = "0.65"
     }
   }
   
-  layers = [
-    local.lambda_layers.dependencies,
-    local.lambda_layers.datamodel,
-    local.lambda_layers.numpy
-  ]
+  vpc_config {
+    subnet_ids         = local.vpc_config.subnet_prv_ids
+    security_group_ids = local.vpc_config.security_group_ids
+  }
   
-  filename         = data.archive_file.pano_mitre_worker.output_path
-  source_code_hash = data.archive_file.pano_mitre_worker.output_base64sha256
+  # Force replacement when switching from Zip to Image
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Orchestrator - just creates work chunks
@@ -478,8 +493,8 @@ resource "aws_lambda_function" "pano_mitre_orchestrator" {
     local.lambda_layers.numpy
   ]
   
-  filename         = data.archive_file.pano_mitre_worker.output_path
-  source_code_hash = data.archive_file.pano_mitre_worker.output_base64sha256
+  filename         = data.archive_file.pano_mitre_orchestrator.output_path
+  source_code_hash = data.archive_file.pano_mitre_orchestrator.output_base64sha256
 }
 
 # CloudWatch Log Groups
@@ -582,6 +597,7 @@ resource "aws_lambda_permission" "snort_parser_eventbridge" {
   source_arn    = aws_cloudwatch_event_rule.snort_parser_trigger.arn
 }
 
+/*
 resource "aws_lambda_permission" "mitre_enricher_eventbridge" {
   statement_id  = "AllowEventBridgeInvoke"
   action        = "lambda:InvokeFunction"
@@ -589,6 +605,7 @@ resource "aws_lambda_permission" "mitre_enricher_eventbridge" {
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.mitre_enricher_trigger.arn
 }
+*/
 
 resource "aws_lambda_permission" "cve_enricher_eventbridge" {
   statement_id  = "AllowEventBridgeInvoke"
