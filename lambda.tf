@@ -67,6 +67,18 @@ data "archive_file" "pano_stix_processor" {
   output_path = "${path.module}/builds/pano-stix-processor.zip"
 }
 
+data "archive_file" "pano_mitre_orchestrator" {
+  type        = "zip"
+  source_dir = "${path.module}/lambda-functions/pano-mitre-orchestrator"
+  output_path = "${path.module}/builds/pano-mitre-orchestrator.zip"
+}
+
+data "archive_file" "pano_mitre_worker" {
+  type        = "zip"
+  source_dir = "${path.module}/lambda-functions/pano-mitre-worker"
+  output_path = "${path.module}/builds/pano-mitre-worker.zip"
+}
+
 # Universal Processor
 resource "aws_lambda_function" "pano_universal_processor" {
   function_name = "pano-universal-processor"
@@ -404,6 +416,70 @@ resource "aws_lambda_function" "pano_stix_processor" {
 
   filename         = data.archive_file.pano_stix_processor.output_path
   source_code_hash = data.archive_file.pano_stix_processor.output_base64sha256
+}
+
+# Worker Lambda - processes 100 rules at a time
+resource "aws_lambda_function" "pano_mitre_worker" {
+  function_name = "pano-mitre-worker"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.13"
+  role          = local.lambda_execrole_arn
+  memory_size   = 512
+  timeout       = 300  # 5 minutes per chunk
+  
+  vpc_config {
+    subnet_ids         = local.vpc_config.subnet_prv_ids
+    security_group_ids = local.vpc_config.security_group_ids
+  }
+  
+  environment {
+    variables = {
+      DB_HOST       = aws_db_instance.panorama.address
+      DB_NAME       = aws_db_instance.panorama.db_name
+      DB_SECRET_ARN = local.db_secret_arn
+    }
+  }
+  
+  layers = [
+    local.lambda_layers.dependencies,
+    local.lambda_layers.datamodel,
+    local.lambda_layers.numpy
+  ]
+  
+  filename         = data.archive_file.pano_mitre_worker.output_path
+  source_code_hash = data.archive_file.pano_mitre_worker.output_base64sha256
+}
+
+# Orchestrator - just creates work chunks
+resource "aws_lambda_function" "pano_mitre_orchestrator" {
+  function_name = "pano-mitre-orchestrator"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.13"
+  role          = local.lambda_execrole_arn
+  memory_size   = 512
+  timeout       = 30 
+  
+  vpc_config {
+    subnet_ids         = local.vpc_config.subnet_prv_ids
+    security_group_ids = local.vpc_config.security_group_ids
+  }
+  
+  environment {
+    variables = {
+      DB_HOST       = aws_db_instance.panorama.address
+      DB_NAME       = aws_db_instance.panorama.db_name
+      DB_SECRET_ARN = local.db_secret_arn
+    }
+  }
+  
+  layers = [
+    local.lambda_layers.dependencies,
+    local.lambda_layers.datamodel,
+    local.lambda_layers.numpy
+  ]
+  
+  filename         = data.archive_file.pano_mitre_worker.output_path
+  source_code_hash = data.archive_file.pano_mitre_worker.output_base64sha256
 }
 
 # CloudWatch Log Groups
