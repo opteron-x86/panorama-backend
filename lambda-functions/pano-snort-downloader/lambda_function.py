@@ -28,8 +28,9 @@ class SnortDownloader:
     """Downloads Snort community rules"""
     
     RULE_URLS = [
-        'https://www.snort.org/downloads/community/snortrules-snapshot-3000.tar.gz',
-        'https://snort.org/downloads/community/community-rules.tar.gz'
+        'https://www.snort.org/downloads/community/snort3-community-rules.tar.gz',  # Primary - most comprehensive
+        'https://www.snort.org/downloads/community/community-rules.tar.gz',         # Fallback
+        'https://www.snort.org/downloads/community/snortrules-snapshot-3000.tar.gz' # Last resort
     ]
     
     def __init__(self):
